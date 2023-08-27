@@ -158,7 +158,7 @@ func (table *SSTable) setupFooter(f *bufReaderWithSeek) (err error) {
 		return nil
 	}
 	b8 := make([]byte, 8)
-	if _, err = f.Seek(-16, 2); err != nil {
+	if _, err = f.Seek(-16, io.SeekEnd); err != nil {
 		return err
 	}
 	if _, err = f.Read(b8); err != nil {
@@ -251,7 +251,7 @@ func (table *SSTable) getFromDisk(key string) (value string, ok bool) {
 		return err.Error(), false
 	}
 	for offset < table.footer.numDataBytes {
-		if item, nBytesRead, err := table.nextDiskEntry(f); err != nil {
+		if item, nBytesRead, err := table.nextDiskEntry(f, key); err != nil {
 			return err.Error(), false
 		} else if item.key == key {
 			// match
@@ -399,7 +399,9 @@ func (table *SSTable) nextSparseIndexEntry(f *bufReaderWithSeek) (item sparseInd
 	return item, bytesRead, nil
 }
 
-func (table *SSTable) nextDiskEntry(f *bufReaderWithSeek) (item ssTableItem, nBytesRead int, err error) {
+// nextDiskEntry reads the next sstable item from disk. It returns the item value only if the key matches forKey.
+// This will save some reads from disk.
+func (table *SSTable) nextDiskEntry(f *bufReaderWithSeek, forKey string) (item ssTableItem, nBytesRead int, err error) {
 	nBytesReadCur := 0
 	nBytesRead = 0
 	b4 := make([]byte, 4)
@@ -424,13 +426,18 @@ func (table *SSTable) nextDiskEntry(f *bufReaderWithSeek) (item ssTableItem, nBy
 
 	if valueLen&uint32(1<<31) != 0 {
 		item.isDeleted = true
-	} else {
+	} else if item.key == forKey {
 		valueBytes := make([]byte, valueLen)
 		if nBytesReadCur, err = io.ReadFull(f, valueBytes); err != nil {
 			return ssTableItem{}, nBytesReadCur + nBytesRead, err
 		}
 		nBytesRead += nBytesReadCur
 		item.value = string(valueBytes)
+	} else {
+		nBytesRead += int(valueLen)
+		if _, err = f.Discard(int(valueLen)); err != nil {
+			return ssTableItem{}, 0, err
+		}
 	}
 	return item, nBytesRead, nil
 }

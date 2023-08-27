@@ -103,7 +103,7 @@ func TemplateTestLarge(
 			key := fmt.Sprintf("key%v", numReadsArg)
 			value := fmt.Sprintf("value%v", numReadsArg)
 			checkExists(t, key, value, &inMem)
-			if numReadsArg%10000 == 1 {
+			if numReadsArg%100000 == 1 {
 				t.Logf("Read %v entries in %v", numReadsArg, time.Now().Sub(readStart))
 			}
 		}(numReads)
