@@ -2,6 +2,7 @@ package sstable
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"github.com/google/btree"
@@ -82,8 +83,8 @@ func sparseIndexItemLess(i1, i2 sparseIndexItem) bool {
 }
 
 type ssTableItem struct {
-	key       string
-	value     string
+	key       []byte
+	value     []byte
 	isDeleted bool
 }
 
@@ -93,7 +94,7 @@ func (item *ssTableItem) size() int {
 }
 
 func ssTableItemLess(i1, i2 ssTableItem) bool {
-	return i1.key < i2.key
+	return bytes.Compare(i1.key, i2.key) < 0
 }
 
 func NewFromFile(name string) SSTable {
@@ -144,11 +145,11 @@ func (table *SSTable) putInternal(item ssTableItem) error {
 }
 
 func (table *SSTable) Put(key, value string) error {
-	return table.putInternal(ssTableItem{key: key, value: value})
+	return table.putInternal(ssTableItem{key: []byte(key), value: []byte(value)})
 }
 
 func (table *SSTable) Delete(key string) error {
-	return table.putInternal(ssTableItem{key: key, isDeleted: true})
+	return table.putInternal(ssTableItem{key: []byte(key), isDeleted: true})
 }
 
 // setupFooter is expected by to called by ensureSparseIndex when
@@ -250,19 +251,20 @@ func (table *SSTable) getFromDisk(key string) (value string, ok bool) {
 	if _, err = f.Seek(offset, io.SeekStart); err != nil {
 		return err.Error(), false
 	}
+	keyBytes := []byte(key)
 	for offset < table.footer.numDataBytes {
-		if item, nBytesRead, err := table.nextDiskEntry(f, key); err != nil {
+		if item, nBytesRead, err := table.nextDiskEntry(f, keyBytes); err != nil {
 			return err.Error(), false
-		} else if item.key == key {
+		} else if cmp := bytes.Compare(item.key, keyBytes); cmp == 0 {
 			// match
 			if item.isDeleted {
 				return "Marked as deleted", false
 			} else {
-				return item.value, true
+				return string(item.value), true
 			}
-		} else if item.key > key {
+		} else if cmp > 0 {
 			// We are past the current key
-			return item.key, false
+			return string(item.key), false
 		} else {
 			offset += int64(nBytesRead)
 		}
@@ -276,13 +278,13 @@ func (table *SSTable) Get(key string) (value string, ok bool) {
 	}
 	table.tableMutex.RLock()
 	defer table.tableMutex.RUnlock()
-	existing, ok := table.memTable.Get(ssTableItem{key: key})
+	existing, ok := table.memTable.Get(ssTableItem{key: []byte(key)})
 	if !ok {
 		return "", false
 	} else if existing.isDeleted {
 		return "", false
 	} else {
-		return existing.value, true
+		return string(existing.value), true
 	}
 }
 
@@ -315,19 +317,19 @@ func (table *SSTable) ConvertToSegmentFile() error {
 		binary.BigEndian.PutUint32(b4, uint32(len(item.key)))
 		// XXX: Handle the errors here correctly
 		n1, err = f.Write(b4)
-		n2, err = f.Write([]byte(item.key))
+		n2, err = f.Write(item.key)
 		valLengthAndIsDeleted := uint32(len(item.value))
 		if item.isDeleted {
 			valLengthAndIsDeleted = 1 << 31
 		}
 		binary.BigEndian.PutUint32(b4, valLengthAndIsDeleted)
 		n3, err = f.Write(b4)
-		n4, err = f.Write([]byte(item.value))
+		n4, err = f.Write(item.value)
 		oldNumDataBytes := numDataBytes
 		numDataBytes += int64(n1 + n2 + n3 + n4)
 		if lastSparseIndexUpdateOffset < 0 ||
 			numDataBytes >= table.config.MaxSparseIndexMapGap+lastSparseIndexUpdateOffset {
-			table.sparseIndex.ReplaceOrInsert(sparseIndexItem{key: item.key, offset: oldNumDataBytes})
+			table.sparseIndex.ReplaceOrInsert(sparseIndexItem{key: string(item.key), offset: oldNumDataBytes})
 			lastSparseIndexUpdateOffset = oldNumDataBytes
 		}
 		return true
@@ -401,7 +403,7 @@ func (table *SSTable) nextSparseIndexEntry(f *bufReaderWithSeek) (item sparseInd
 
 // nextDiskEntry reads the next sstable item from disk. It returns the item value only if the key matches forKey.
 // This will save some reads from disk.
-func (table *SSTable) nextDiskEntry(f *bufReaderWithSeek, forKey string) (item ssTableItem, nBytesRead int, err error) {
+func (table *SSTable) nextDiskEntry(f *bufReaderWithSeek, forKey []byte) (item ssTableItem, nBytesRead int, err error) {
 	nBytesReadCur := 0
 	nBytesRead = 0
 	b4 := make([]byte, 4)
@@ -416,7 +418,7 @@ func (table *SSTable) nextDiskEntry(f *bufReaderWithSeek, forKey string) (item s
 		return ssTableItem{}, nBytesReadCur + nBytesRead, err
 	}
 	nBytesRead += nBytesReadCur
-	item.key = string(keyBytes)
+	item.key = keyBytes
 
 	if nBytesReadCur, err = io.ReadFull(f, b4); err != nil {
 		return ssTableItem{}, nBytesReadCur + nBytesRead, err
@@ -426,13 +428,13 @@ func (table *SSTable) nextDiskEntry(f *bufReaderWithSeek, forKey string) (item s
 
 	if valueLen&uint32(1<<31) != 0 {
 		item.isDeleted = true
-	} else if item.key == forKey {
+	} else if bytes.Compare(item.key, forKey) == 0 {
 		valueBytes := make([]byte, valueLen)
 		if nBytesReadCur, err = io.ReadFull(f, valueBytes); err != nil {
 			return ssTableItem{}, nBytesReadCur + nBytesRead, err
 		}
 		nBytesRead += nBytesReadCur
-		item.value = string(valueBytes)
+		item.value = valueBytes
 	} else {
 		nBytesRead += int(valueLen)
 		if _, err = f.Discard(int(valueLen)); err != nil {
