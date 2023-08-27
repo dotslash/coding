@@ -1,10 +1,12 @@
 package sstable
 
 import (
+	"context"
 	"fmt"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/semaphore"
 	"testing"
 	"time"
 )
@@ -62,9 +64,13 @@ type TemplateTestLargeRes struct {
 	sparseIndexSize      int
 	sparseIndexDiskBytes int64
 	numReads             int
+	readConcurrency      int
 }
 
-func TemplateTestLarge(t *testing.T, config Config, maxTimeForReads time.Duration) TemplateTestLargeRes {
+func TemplateTestLarge(
+	t *testing.T, config Config,
+	maxTimeForReads time.Duration, readConcurrency int,
+) TemplateTestLargeRes {
 	fuuid, _ := uuid.NewRandom()
 	fName := fmt.Sprintf("/tmp/sstable_test_%s.dump", fuuid.String())
 	t.Logf("ss table output: %s", fName)
@@ -87,14 +93,22 @@ func TemplateTestLarge(t *testing.T, config Config, maxTimeForReads time.Duratio
 
 	readStart := time.Now()
 	numReads := 0
+
+	sem := semaphore.NewWeighted(int64(readConcurrency))
 	for ; numReads < 1000*1000 && time.Now().Sub(readStart) < maxTimeForReads; numReads++ {
-		key := fmt.Sprintf("key%v", numReads)
-		value := fmt.Sprintf("value%v", numReads)
-		checkExists(t, key, value, &inMem)
-		if numReads%10000 == 1 {
-			t.Logf("Read %v entries in %v", numReads, time.Now().Sub(readStart))
-		}
+		assert.Equal(t, sem.Acquire(context.TODO(), 1), nil)
+		go func(numReadsArg int) {
+			defer sem.Release(1)
+			// Actual test
+			key := fmt.Sprintf("key%v", numReadsArg)
+			value := fmt.Sprintf("value%v", numReadsArg)
+			checkExists(t, key, value, &inMem)
+			if numReadsArg%10000 == 1 {
+				t.Logf("Read %v entries in %v", numReadsArg, time.Now().Sub(readStart))
+			}
+		}(numReads)
 	}
+	assert.Equal(t, sem.Acquire(context.TODO(), int64(readConcurrency)), nil)
 	t.Logf("Read %v entries in %v", numReads, time.Now().Sub(readStart))
 	return TemplateTestLargeRes{
 		putLatency:           flushStart.Sub(start),
@@ -103,39 +117,39 @@ func TemplateTestLarge(t *testing.T, config Config, maxTimeForReads time.Duratio
 		sparseIndexDiskBytes: inMem.footer.numSparseIndexBytes,
 		sparseIndexSize:      inMem.sparseIndex.Len(),
 		numReads:             numReads,
+		readConcurrency:      readConcurrency,
 	}
 
 }
 
 func TestLarge1(t *testing.T) {
 	config := Config{DefaultMaxMemTableSize, 16 * 1024}
-	res := TemplateTestLarge(t, config, 10*time.Second)
+	res := TemplateTestLarge(t, config, 10*time.Second, 32)
 	t.Logf("config: %#v result: %#v", config, res)
 }
 
 func TestLarge2(t *testing.T) {
-	t.Skip("Skip for now")
-	config := Config{DefaultMaxMemTableSize, 32 * 1024}
-	res := TemplateTestLarge(t, config, 10*time.Second)
+	config := Config{DefaultMaxMemTableSize, 16 * 1024}
+	res := TemplateTestLarge(t, config, 10*time.Second, 16)
 	t.Logf("config: %#v result: %#v", config, res)
 }
 func TestLarge3(t *testing.T) {
 	t.Skip("Skip for now")
 	config := Config{DefaultMaxMemTableSize, 64 * 1024}
-	res := TemplateTestLarge(t, config, 10*time.Second)
+	res := TemplateTestLarge(t, config, 10*time.Second, 16)
 	t.Logf("config: %#v result: %#v", config, res)
 }
 
 func TestLarge4(t *testing.T) {
 	t.Skip("Skip for now")
 	config := Config{DefaultMaxMemTableSize, 128 * 1024}
-	res := TemplateTestLarge(t, config, 10*time.Second)
+	res := TemplateTestLarge(t, config, 10*time.Second, 16)
 	t.Logf("config: %#v result: %#v", config, res)
 }
 
 func TestLarge5(t *testing.T) {
 	t.Skip("Skip for now")
 	config := Config{DefaultMaxMemTableSize, 256 * 1024}
-	res := TemplateTestLarge(t, config, 10*time.Second)
+	res := TemplateTestLarge(t, config, 10*time.Second, 16)
 	t.Logf("config: %#v result: %#v", config, res)
 }

@@ -6,7 +6,9 @@ import (
 	"errors"
 	"github.com/google/btree"
 	"io"
+	"math/rand"
 	"os"
+	"sync"
 )
 
 const (
@@ -19,7 +21,8 @@ const DefaultSparseIndexMaxGap = int64(128 * 1024)
 
 type bufReaderWithSeek struct {
 	*bufio.Reader
-	raw io.ReadWriteSeeker
+	raw  io.ReadWriteSeeker
+	lock sync.Locker
 }
 
 func (s *bufReaderWithSeek) Seek(offset int64, whence int) (newOffset int64, err error) {
@@ -32,14 +35,6 @@ func (s *bufReaderWithSeek) Seek(offset int64, whence int) (newOffset int64, err
 	// Reset the buffer state
 	s.Reset(s.raw)
 	return newOffset, nil
-}
-
-func newBufReaderWithSeek(f *os.File) *bufReaderWithSeek {
-	ret := &bufReaderWithSeek{
-		Reader: bufio.NewReader(f),
-		raw:    f,
-	}
-	return ret
 }
 
 type ssTableFooterInfo struct {
@@ -58,19 +53,28 @@ type SSTable struct {
 	// When its in file Mode, ss table is immutable i.e write operations will
 	// be disallowed
 	// TODO: read write locks
-	memTable     *btree.BTree
+	memTable     *btree.BTreeG[ssTableItem]
 	memTableSize int
 
 	sparseIndex *btree.BTreeG[sparseIndexItem]
 	fileName    string
 	footer      *ssTableFooterInfo
 	config      Config
-	reader      *bufReaderWithSeek
+	readers     []*bufReaderWithSeek
+	tableMutex  sync.RWMutex
 }
 
 type sparseIndexItem struct {
 	key    string
 	offset int64
+}
+
+func createEmptyReaders(cnt int) []*bufReaderWithSeek {
+	ret := make([]*bufReaderWithSeek, cnt)
+	for i := 0; i < cnt; i++ {
+		ret[i] = &bufReaderWithSeek{lock: &sync.Mutex{}}
+	}
+	return ret
 }
 
 func sparseIndexItemLess(i1, i2 sparseIndexItem) bool {
@@ -88,35 +92,28 @@ func (item *ssTableItem) size() int {
 
 }
 
-func (item ssTableItem) Less(other btree.Item) bool {
-	castedOther, ok := other.(ssTableItem)
-	if !ok {
-		// ssTableItem is always >= other btree.Item
-		return false
-	}
-	return item.key < castedOther.key
+func ssTableItemLess(i1, i2 ssTableItem) bool {
+	return i1.key < i2.key
 }
 
 func NewFromFile(name string) SSTable {
-	return SSTable{fileName: name}
+	return SSTable{
+		fileName: name,
+		readers:  createEmptyReaders(16),
+	}
 }
 
 func EmptyWithDefaultConfig(fileName string) SSTable {
-	return SSTable{
-		memTable: btree.New(2),
-		fileName: fileName,
-		config: Config{
-			MaxMemTableSize:      DefaultMaxMemTableSize,
-			MaxSparseIndexMapGap: DefaultSparseIndexMaxGap,
-		},
-	}
+	defaultConf := Config{MaxMemTableSize: DefaultMaxMemTableSize, MaxSparseIndexMapGap: DefaultSparseIndexMaxGap}
+	return Empty(fileName, defaultConf)
 }
 
 func Empty(fileName string, config Config) SSTable {
 	return SSTable{
-		memTable: btree.New(2),
+		memTable: btree.NewG(2, ssTableItemLess),
 		fileName: fileName,
 		config:   config,
+		readers:  createEmptyReaders(16),
 	}
 }
 
@@ -132,11 +129,12 @@ func (table *SSTable) putInternal(item ssTableItem) error {
 	if table.Mode() != ModeInMem {
 		return errors.New("RO SSTtable")
 	}
-	oldRaw := table.memTable.ReplaceOrInsert(item)
-	if oldRaw == nil {
+	table.tableMutex.Lock()
+	defer table.tableMutex.Unlock()
+	old, oldExists := table.memTable.ReplaceOrInsert(item)
+	if !oldExists {
 		table.memTableSize += item.size()
 	} else {
-		old := oldRaw.(ssTableItem)
 		table.memTableSize += item.size() - old.size()
 	}
 	if int64(table.memTableSize) > table.config.MaxMemTableSize {
@@ -153,11 +151,12 @@ func (table *SSTable) Delete(key string) error {
 	return table.putInternal(ssTableItem{key: key, isDeleted: true})
 }
 
+// setupFooter is expected by to called by ensureSparseIndex when
+// tableMutex is held
 func (table *SSTable) setupFooter(f *bufReaderWithSeek) (err error) {
 	if table.footer != nil {
 		return nil
 	}
-	// TODO: Handle concurrency here
 	b8 := make([]byte, 8)
 	if _, err = f.Seek(-16, 2); err != nil {
 		return err
@@ -182,8 +181,11 @@ func (table *SSTable) ensureSparseIndex() error {
 	if table.sparseIndex != nil {
 		return nil
 	}
-	// TODO: Add mutex to ensure this runs only once
+	table.tableMutex.Lock()
+	defer table.tableMutex.Unlock()
+
 	f, err := table.getFileHandle()
+	defer f.lock.Unlock()
 	if err != nil {
 		return err
 	}
@@ -212,14 +214,17 @@ func (table *SSTable) ensureSparseIndex() error {
 }
 
 func (table *SSTable) getFileHandle() (ret *bufReaderWithSeek, err error) {
-	if table.reader == nil {
+	readerId := rand.Int() % len(table.readers)
+	table.readers[readerId].lock.Lock()
+	if table.readers[readerId].Reader == nil {
 		if rawFile, err := os.Open(table.fileName); err != nil {
 			return nil, err
 		} else {
-			table.reader = newBufReaderWithSeek(rawFile)
+			table.readers[readerId].Reader = bufio.NewReader(rawFile)
+			table.readers[readerId].raw = rawFile
 		}
 	}
-	return table.reader, nil
+	return table.readers[readerId], nil
 }
 
 // TODO: return error value as well.
@@ -238,6 +243,7 @@ func (table *SSTable) getFromDisk(key string) (value string, ok bool) {
 		return "", false
 	}
 	f, err := table.getFileHandle()
+	defer f.lock.Unlock()
 	if err != nil {
 		return err.Error(), false
 	}
@@ -268,10 +274,12 @@ func (table *SSTable) Get(key string) (value string, ok bool) {
 	if table.Mode() != ModeInMem {
 		return table.getFromDisk(key)
 	}
-	rawExisting := table.memTable.Get(ssTableItem{key: key})
-	if rawExisting == nil {
+	table.tableMutex.RLock()
+	defer table.tableMutex.RUnlock()
+	existing, ok := table.memTable.Get(ssTableItem{key: key})
+	if !ok {
 		return "", false
-	} else if existing := rawExisting.(ssTableItem); existing.isDeleted {
+	} else if existing.isDeleted {
 		return "", false
 	} else {
 		return existing.value, true
@@ -303,8 +311,7 @@ func (table *SSTable) ConvertToSegmentFile() error {
 	numDataBytes := int64(0)
 	lastSparseIndexUpdateOffset := int64(-1)
 	table.sparseIndex = btree.NewG(2, sparseIndexItemLess)
-	memTableHandle := func(itemRaw btree.Item) bool {
-		item := itemRaw.(ssTableItem)
+	memTableHandle := func(item ssTableItem) bool {
 		binary.BigEndian.PutUint32(b4, uint32(len(item.key)))
 		// XXX: Handle the errors here correctly
 		n1, err = f.Write(b4)
