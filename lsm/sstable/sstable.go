@@ -274,12 +274,13 @@ func (table *SSTable) ConvertToSegmentFile() error {
 		// XXX: Return an error?
 		return nil
 	}
-	f, err := os.Create(table.fileName)
+	fRaw, err := os.Create(table.fileName)
 	if err != nil {
 		return err
 	}
+	f := bufio.NewWriter(fRaw)
 	defer func() {
-		err2 := f.Close()
+		err2 := fRaw.Close()
 		if err == nil {
 			err = err2
 		}
@@ -343,8 +344,8 @@ func (table *SSTable) ConvertToSegmentFile() error {
 		return err
 	}
 	table.memTable = nil
-	if err = f.Close(); err != nil {
-		f = nil
+	if err = fRaw.Close(); err != nil {
+		fRaw = nil
 		return err
 	}
 	table.footer = &ssTableFooterInfo{

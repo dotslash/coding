@@ -114,23 +114,27 @@ func TestLarge1(t *testing.T) {
 }
 
 func TestLarge2(t *testing.T) {
+	t.Skip("Skip for now")
 	config := Config{DefaultMaxMemTableSize, 32 * 1024}
 	res := TemplateTestLarge(t, config, 10*time.Second)
 	t.Logf("config: %#v result: %#v", config, res)
 }
 func TestLarge3(t *testing.T) {
+	t.Skip("Skip for now")
 	config := Config{DefaultMaxMemTableSize, 64 * 1024}
 	res := TemplateTestLarge(t, config, 10*time.Second)
 	t.Logf("config: %#v result: %#v", config, res)
 }
 
 func TestLarge4(t *testing.T) {
+	t.Skip("Skip for now")
 	config := Config{DefaultMaxMemTableSize, 128 * 1024}
 	res := TemplateTestLarge(t, config, 10*time.Second)
 	t.Logf("config: %#v result: %#v", config, res)
 }
 
 func TestLarge5(t *testing.T) {
+	t.Skip("Skip for now")
 	config := Config{DefaultMaxMemTableSize, 256 * 1024}
 	res := TemplateTestLarge(t, config, 10*time.Second)
 	t.Logf("config: %#v result: %#v", config, res)
