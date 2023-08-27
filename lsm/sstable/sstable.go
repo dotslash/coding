@@ -17,12 +17,12 @@ const (
 const DefaultMaxMemTableSize = int64(32 * 1024 * 1024)
 const DefaultSparseIndexMaxGap = int64(128 * 1024)
 
-type bufferWithSeek struct {
+type bufReaderWithSeek struct {
 	*bufio.Reader
 	raw io.ReadWriteSeeker
 }
 
-func (s *bufferWithSeek) Seek(offset int64, whence int) (newOffset int64, err error) {
+func (s *bufReaderWithSeek) Seek(offset int64, whence int) (newOffset int64, err error) {
 	// Perform the raw seek
 	newOffset, err = s.raw.Seek(offset, whence)
 	if err != nil {
@@ -34,8 +34,8 @@ func (s *bufferWithSeek) Seek(offset int64, whence int) (newOffset int64, err er
 	return newOffset, nil
 }
 
-func newBufferWithSeek(f *os.File) *bufferWithSeek {
-	ret := &bufferWithSeek{
+func newBufReaderWithSeek(f *os.File) *bufReaderWithSeek {
+	ret := &bufReaderWithSeek{
 		Reader: bufio.NewReader(f),
 		raw:    f,
 	}
@@ -65,6 +65,7 @@ type SSTable struct {
 	fileName    string
 	footer      *ssTableFooterInfo
 	config      Config
+	reader      *bufReaderWithSeek
 }
 
 type sparseIndexItem struct {
@@ -152,7 +153,7 @@ func (table *SSTable) Delete(key string) error {
 	return table.putInternal(ssTableItem{key: key, isDeleted: true})
 }
 
-func (table *SSTable) setupFooter(f *bufferWithSeek) (err error) {
+func (table *SSTable) setupFooter(f *bufReaderWithSeek) (err error) {
 	if table.footer != nil {
 		return nil
 	}
@@ -182,8 +183,7 @@ func (table *SSTable) ensureSparseIndex() error {
 		return nil
 	}
 	// TODO: Add mutex to ensure this runs only once
-	rawf, err := os.Open(table.fileName)
-	f := newBufferWithSeek(rawf)
+	f, err := table.getFileHandle()
 	if err != nil {
 		return err
 	}
@@ -211,6 +211,17 @@ func (table *SSTable) ensureSparseIndex() error {
 	return nil
 }
 
+func (table *SSTable) getFileHandle() (ret *bufReaderWithSeek, err error) {
+	if table.reader == nil {
+		if rawFile, err := os.Open(table.fileName); err != nil {
+			return nil, err
+		} else {
+			table.reader = newBufReaderWithSeek(rawFile)
+		}
+	}
+	return table.reader, nil
+}
+
 // TODO: return error value as well.
 func (table *SSTable) getFromDisk(key string) (value string, ok bool) {
 	offset := int64(-1)
@@ -226,12 +237,10 @@ func (table *SSTable) getFromDisk(key string) (value string, ok bool) {
 		// key is smaller than the smallest entry of the table.
 		return "", false
 	}
-	rawf, err := os.Open(table.fileName)
-	f := newBufferWithSeek(rawf)
+	f, err := table.getFileHandle()
 	if err != nil {
 		return err.Error(), false
 	}
-	defer rawf.Close()
 	if _, err = f.Seek(offset, io.SeekStart); err != nil {
 		return err.Error(), false
 	}
@@ -357,7 +366,7 @@ func (table *SSTable) ConvertToSegmentFile() error {
 	return err
 }
 
-func (table *SSTable) nextSparseIndexEntry(f *bufferWithSeek) (item sparseIndexItem, bytesRead int, err error) {
+func (table *SSTable) nextSparseIndexEntry(f *bufReaderWithSeek) (item sparseIndexItem, bytesRead int, err error) {
 	var bytesReadCur int
 	bytesRead = 0
 	b8 := make([]byte, 8)
@@ -383,7 +392,7 @@ func (table *SSTable) nextSparseIndexEntry(f *bufferWithSeek) (item sparseIndexI
 	return item, bytesRead, nil
 }
 
-func (table *SSTable) nextDiskEntry(f *bufferWithSeek) (item ssTableItem, nBytesRead int, err error) {
+func (table *SSTable) nextDiskEntry(f *bufReaderWithSeek) (item ssTableItem, nBytesRead int, err error) {
 	nBytesReadCur := 0
 	nBytesRead = 0
 	b4 := make([]byte, 4)
