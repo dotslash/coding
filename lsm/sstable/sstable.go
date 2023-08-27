@@ -88,6 +88,36 @@ type ssTableItem struct {
 	isDeleted bool
 }
 
+type ssTableItemDisk struct {
+	key       []byte
+	value     []byte
+	keylen    int
+	valuelen  int
+	isDeleted bool
+}
+
+func (item *ssTableItemDisk) getKeySlice() []byte {
+	return item.key[:item.keylen]
+}
+
+func (item *ssTableItemDisk) getValueSlice() []byte {
+	return item.value[:item.valuelen]
+}
+
+func (item *ssTableItemDisk) setKeyLen(keyLen int) {
+	item.keylen = keyLen
+	if len(item.key) < item.keylen {
+		item.value = make([]byte, item.keylen)
+	}
+}
+
+func (item *ssTableItemDisk) setValueLen(valueLen int) {
+	item.valuelen = valueLen
+	if len(item.value) < item.valuelen {
+		item.value = make([]byte, item.valuelen)
+	}
+}
+
 func (item *ssTableItem) size() int {
 	return len(item.key) + len(item.value) + 1
 
@@ -252,20 +282,26 @@ func (table *SSTable) getFromDisk(key string) (value string, ok bool) {
 		return err.Error(), false
 	}
 	keyBytes := []byte(key)
-	item := ssTableItem{}
+	item := ssTableItemDisk{
+		key:       make([]byte, 128),
+		value:     make([]byte, 128),
+		keylen:    0,
+		valuelen:  0,
+		isDeleted: false,
+	}
 	for offset < table.footer.numDataBytes {
 		if nBytesRead, err := table.nextDiskEntry(f, keyBytes, &item); err != nil {
 			return err.Error(), false
-		} else if cmp := bytes.Compare(item.key, keyBytes); cmp == 0 {
+		} else if cmp := bytes.Compare(item.getKeySlice(), keyBytes); cmp == 0 {
 			// match
 			if item.isDeleted {
 				return "Marked as deleted", false
 			} else {
-				return string(item.value), true
+				return string(item.getValueSlice()), true
 			}
 		} else if cmp > 0 {
 			// We are past the current key
-			return string(item.key), false
+			return string(item.getValueSlice()), false
 		} else {
 			offset += int64(nBytesRead)
 		}
@@ -405,7 +441,7 @@ func (table *SSTable) nextSparseIndexEntry(f *bufReaderWithSeek) (item sparseInd
 
 // nextDiskEntry reads the next sstable item from disk. It returns the item value only if the key matches forKey.
 // This will save some reads from disk.
-func (table *SSTable) nextDiskEntry(f *bufReaderWithSeek, forKey []byte, item *ssTableItem) (nBytesRead int, err error) {
+func (table *SSTable) nextDiskEntry(f *bufReaderWithSeek, forKey []byte, item *ssTableItemDisk) (nBytesRead int, err error) {
 	nBytesReadCur := 0
 	nBytesRead = 0
 	b4 := make([]byte, 4)
@@ -413,14 +449,12 @@ func (table *SSTable) nextDiskEntry(f *bufReaderWithSeek, forKey []byte, item *s
 		return nBytesReadCur + nBytesRead, err
 	}
 	nBytesRead += nBytesReadCur
-	keyLen := binary.BigEndian.Uint32(b4)
+	item.setKeyLen(int(binary.BigEndian.Uint32(b4)))
 
-	keyBytes := make([]byte, keyLen)
-	if nBytesReadCur, err = io.ReadFull(f, keyBytes); err != nil {
+	if nBytesReadCur, err = io.ReadFull(f, item.getKeySlice()); err != nil {
 		return nBytesReadCur + nBytesRead, err
 	}
 	nBytesRead += nBytesReadCur
-	item.key = keyBytes
 
 	if nBytesReadCur, err = io.ReadFull(f, b4); err != nil {
 		return nBytesReadCur + nBytesRead, err
@@ -430,13 +464,12 @@ func (table *SSTable) nextDiskEntry(f *bufReaderWithSeek, forKey []byte, item *s
 
 	if valueLen&uint32(1<<31) != 0 {
 		item.isDeleted = true
-	} else if bytes.Compare(item.key, forKey) == 0 {
-		valueBytes := make([]byte, valueLen)
-		if nBytesReadCur, err = io.ReadFull(f, valueBytes); err != nil {
+	} else if bytes.Compare(item.key[:item.keylen], forKey) == 0 {
+		item.setValueLen(int(valueLen))
+		if nBytesReadCur, err = io.ReadFull(f, item.getValueSlice()); err != nil {
 			return nBytesReadCur + nBytesRead, err
 		}
 		nBytesRead += nBytesReadCur
-		item.value = valueBytes
 	} else {
 		nBytesRead += int(valueLen)
 		if _, err = f.Discard(int(valueLen)); err != nil {
