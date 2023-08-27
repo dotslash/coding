@@ -289,6 +289,7 @@ func (table *SSTable) Get(key string) (value string, ok bool) {
 }
 
 func (table *SSTable) ConvertToSegmentFile() error {
+	// TODO: Lock the datastructure here.
 	if table.Mode() == ModeInFile {
 		// XXX: Return an error?
 		return nil
