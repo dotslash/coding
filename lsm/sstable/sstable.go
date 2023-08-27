@@ -252,8 +252,9 @@ func (table *SSTable) getFromDisk(key string) (value string, ok bool) {
 		return err.Error(), false
 	}
 	keyBytes := []byte(key)
+	item := ssTableItem{}
 	for offset < table.footer.numDataBytes {
-		if item, nBytesRead, err := table.nextDiskEntry(f, keyBytes); err != nil {
+		if nBytesRead, err := table.nextDiskEntry(f, keyBytes, &item); err != nil {
 			return err.Error(), false
 		} else if cmp := bytes.Compare(item.key, keyBytes); cmp == 0 {
 			// match
@@ -404,25 +405,25 @@ func (table *SSTable) nextSparseIndexEntry(f *bufReaderWithSeek) (item sparseInd
 
 // nextDiskEntry reads the next sstable item from disk. It returns the item value only if the key matches forKey.
 // This will save some reads from disk.
-func (table *SSTable) nextDiskEntry(f *bufReaderWithSeek, forKey []byte) (item ssTableItem, nBytesRead int, err error) {
+func (table *SSTable) nextDiskEntry(f *bufReaderWithSeek, forKey []byte, item *ssTableItem) (nBytesRead int, err error) {
 	nBytesReadCur := 0
 	nBytesRead = 0
 	b4 := make([]byte, 4)
 	if nBytesReadCur, err = io.ReadFull(f, b4); err != nil {
-		return ssTableItem{}, nBytesReadCur + nBytesRead, err
+		return nBytesReadCur + nBytesRead, err
 	}
 	nBytesRead += nBytesReadCur
 	keyLen := binary.BigEndian.Uint32(b4)
 
 	keyBytes := make([]byte, keyLen)
 	if nBytesReadCur, err = io.ReadFull(f, keyBytes); err != nil {
-		return ssTableItem{}, nBytesReadCur + nBytesRead, err
+		return nBytesReadCur + nBytesRead, err
 	}
 	nBytesRead += nBytesReadCur
 	item.key = keyBytes
 
 	if nBytesReadCur, err = io.ReadFull(f, b4); err != nil {
-		return ssTableItem{}, nBytesReadCur + nBytesRead, err
+		return nBytesReadCur + nBytesRead, err
 	}
 	nBytesRead += nBytesReadCur
 	valueLen := binary.BigEndian.Uint32(b4)
@@ -432,15 +433,15 @@ func (table *SSTable) nextDiskEntry(f *bufReaderWithSeek, forKey []byte) (item s
 	} else if bytes.Compare(item.key, forKey) == 0 {
 		valueBytes := make([]byte, valueLen)
 		if nBytesReadCur, err = io.ReadFull(f, valueBytes); err != nil {
-			return ssTableItem{}, nBytesReadCur + nBytesRead, err
+			return nBytesReadCur + nBytesRead, err
 		}
 		nBytesRead += nBytesReadCur
 		item.value = valueBytes
 	} else {
 		nBytesRead += int(valueLen)
 		if _, err = f.Discard(int(valueLen)); err != nil {
-			return ssTableItem{}, 0, err
+			return 0, err
 		}
 	}
-	return item, nBytesRead, nil
+	return nBytesRead, nil
 }
