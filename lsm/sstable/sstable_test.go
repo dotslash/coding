@@ -4,14 +4,15 @@ import (
 	"fmt"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"testing"
 	"time"
 )
 
 func checkExists(t *testing.T, key, value string, sstable *SSTable) {
 	actualValue, ok := sstable.Get(key)
-	assert.Equal(t, ok, true)
-	assert.Equal(t, actualValue, value)
+	assert.Equal(t, true, ok, "for %s->%s", key, value)
+	require.Equal(t, value, actualValue, "for %s->%s", key, value)
 }
 
 func checkNotExists(t *testing.T, key string, sstable *SSTable) {
@@ -74,7 +75,7 @@ func TemplateTestLarge(t *testing.T, config Config, maxTimeForReads time.Duratio
 		value := fmt.Sprintf("value%v", i)
 		err := inMem.Put(key, value)
 		assert.Equal(t, err, nil)
-		if i%100000 == 0 {
+		if i%100000 == 1 {
 			t.Logf("Put %v entries in %v", i, time.Now().Sub(start))
 		}
 	}
@@ -90,7 +91,7 @@ func TemplateTestLarge(t *testing.T, config Config, maxTimeForReads time.Duratio
 		key := fmt.Sprintf("key%v", numReads)
 		value := fmt.Sprintf("value%v", numReads)
 		checkExists(t, key, value, &inMem)
-		if numReads%1000 == 1 {
+		if numReads%10000 == 1 {
 			t.Logf("Read %v entries in %v", numReads, time.Now().Sub(readStart))
 		}
 	}

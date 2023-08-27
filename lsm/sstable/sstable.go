@@ -1,9 +1,11 @@
 package sstable
 
 import (
+	"bufio"
 	"encoding/binary"
 	"errors"
 	"github.com/google/btree"
+	"io"
 	"os"
 )
 
@@ -14,6 +16,31 @@ const (
 
 const DefaultMaxMemTableSize = int64(32 * 1024 * 1024)
 const DefaultSparseIndexMaxGap = int64(128 * 1024)
+
+type bufferWithSeek struct {
+	*bufio.Reader
+	raw io.ReadWriteSeeker
+}
+
+func (s *bufferWithSeek) Seek(offset int64, whence int) (newOffset int64, err error) {
+	// Perform the raw seek
+	newOffset, err = s.raw.Seek(offset, whence)
+	if err != nil {
+		return 0, err
+	}
+
+	// Reset the buffer state
+	s.Reset(s.raw)
+	return newOffset, nil
+}
+
+func newBufferWithSeek(f *os.File) *bufferWithSeek {
+	ret := &bufferWithSeek{
+		Reader: bufio.NewReader(f),
+		raw:    f,
+	}
+	return ret
+}
 
 type ssTableFooterInfo struct {
 	numDataBytes        int64
@@ -125,7 +152,7 @@ func (table *SSTable) Delete(key string) error {
 	return table.putInternal(ssTableItem{key: key, isDeleted: true})
 }
 
-func (table *SSTable) setupFooter(f *os.File) (err error) {
+func (table *SSTable) setupFooter(f *bufferWithSeek) (err error) {
 	if table.footer != nil {
 		return nil
 	}
@@ -155,7 +182,8 @@ func (table *SSTable) ensureSparseIndex() error {
 		return nil
 	}
 	// TODO: Add mutex to ensure this runs only once
-	f, err := os.Open(table.fileName)
+	rawf, err := os.Open(table.fileName)
+	f := newBufferWithSeek(rawf)
 	if err != nil {
 		return err
 	}
@@ -168,13 +196,15 @@ func (table *SSTable) ensureSparseIndex() error {
 		table.footer.numDataBytes+table.footer.numSparseIndexBytes
 	curIndex := sparseIndexStart
 	sparseIndex := btree.NewG(2, sparseIndexItemLess)
+	if _, err = f.Seek(curIndex, io.SeekStart); err != nil {
+		return err
+	}
 	for curIndex < sparseIndexEnd {
-		var item sparseIndexItem
-		var err error
-		item, curIndex, err = table.nextSparseIndexEntry(f, curIndex)
+		item, nBytesRead, err := table.nextSparseIndexEntry(f)
 		if err != nil {
 			return err
 		}
+		curIndex += int64(nBytesRead)
 		sparseIndex.ReplaceOrInsert(item)
 	}
 	table.sparseIndex = sparseIndex
@@ -196,14 +226,17 @@ func (table *SSTable) getFromDisk(key string) (value string, ok bool) {
 		// key is smaller than the smallest entry of the table.
 		return "", false
 	}
-	f, err := os.Open(table.fileName)
+	rawf, err := os.Open(table.fileName)
+	f := newBufferWithSeek(rawf)
 	if err != nil {
 		return err.Error(), false
 	}
-	defer f.Close()
-	var item ssTableItem
+	defer rawf.Close()
+	if _, err = f.Seek(offset, io.SeekStart); err != nil {
+		return err.Error(), false
+	}
 	for offset < table.footer.numDataBytes {
-		if item, offset, err = table.nextDiskEntry(f, offset); err != nil {
+		if item, nBytesRead, err := table.nextDiskEntry(f); err != nil {
 			return err.Error(), false
 		} else if item.key == key {
 			// match
@@ -214,7 +247,9 @@ func (table *SSTable) getFromDisk(key string) (value string, ok bool) {
 			}
 		} else if item.key > key {
 			// We are past the current key
-			return "", false
+			return item.key, false
+		} else {
+			offset += int64(nBytesRead)
 		}
 	}
 	return "End of DataSection", false
@@ -321,71 +356,64 @@ func (table *SSTable) ConvertToSegmentFile() error {
 	return err
 }
 
-func (table *SSTable) nextSparseIndexEntry(f *os.File, offset int64) (item sparseIndexItem, newOffSet int64, err error) {
-	newOffSet = offset
-	bytesRead := 0
-	if _, err := f.Seek(offset, 0); err != nil {
-		return sparseIndexItem{}, 0, err
-	}
+func (table *SSTable) nextSparseIndexEntry(f *bufferWithSeek) (item sparseIndexItem, bytesRead int, err error) {
+	var bytesReadCur int
+	bytesRead = 0
 	b8 := make([]byte, 8)
 	b4 := make([]byte, 4)
-	if bytesRead, err = f.Read(b4); err != nil {
-		return sparseIndexItem{}, 0, err
+	if bytesReadCur, err = f.Read(b4); err != nil {
+		return sparseIndexItem{}, bytesReadCur + bytesRead, err
 	}
+	bytesRead += bytesReadCur
 	keyLen := binary.BigEndian.Uint32(b4)
-	newOffSet += int64(bytesRead)
 
 	keyBytes := make([]byte, keyLen)
-	if bytesRead, err = f.Read(keyBytes); err != nil {
-		return sparseIndexItem{}, 0, err
+	if bytesReadCur, err = f.Read(keyBytes); err != nil {
+		return sparseIndexItem{}, bytesReadCur + bytesRead, err
 	}
+	bytesRead += bytesReadCur
 	item.key = string(keyBytes)
-	newOffSet += int64(bytesRead)
 
-	if bytesRead, err = f.Read(b8); err != nil {
-		return sparseIndexItem{}, 0, err
+	if bytesReadCur, err = f.Read(b8); err != nil {
+		return sparseIndexItem{}, bytesReadCur + bytesRead, err
 	}
+	bytesRead += bytesReadCur
 	item.offset = int64(binary.BigEndian.Uint64(b8))
-	newOffSet += int64(bytesRead)
-	return item, newOffSet, nil
+	return item, bytesRead, nil
 }
 
-func (table *SSTable) nextDiskEntry(f *os.File, offset int64) (item ssTableItem, newOffSet int64, err error) {
-	newOffSet = offset
-	bytesRead := 0
-	if _, err := f.Seek(offset, 0); err != nil {
-		return ssTableItem{}, 0, err
-	}
-
+func (table *SSTable) nextDiskEntry(f *bufferWithSeek) (item ssTableItem, nBytesRead int, err error) {
+	nBytesReadCur := 0
+	nBytesRead = 0
 	b4 := make([]byte, 4)
-	if bytesRead, err = f.Read(b4); err != nil {
-		return ssTableItem{}, 0, err
+	if nBytesReadCur, err = io.ReadFull(f, b4); err != nil {
+		return ssTableItem{}, nBytesReadCur + nBytesRead, err
 	}
+	nBytesRead += nBytesReadCur
 	keyLen := binary.BigEndian.Uint32(b4)
-	newOffSet += int64(bytesRead)
 
 	keyBytes := make([]byte, keyLen)
-	if bytesRead, err = f.Read(keyBytes); err != nil {
-		return ssTableItem{}, 0, err
+	if nBytesReadCur, err = io.ReadFull(f, keyBytes); err != nil {
+		return ssTableItem{}, nBytesReadCur + nBytesRead, err
 	}
+	nBytesRead += nBytesReadCur
 	item.key = string(keyBytes)
-	newOffSet += int64(bytesRead)
 
-	if bytesRead, err = f.Read(b4); err != nil {
-		return ssTableItem{}, 0, err
+	if nBytesReadCur, err = io.ReadFull(f, b4); err != nil {
+		return ssTableItem{}, nBytesReadCur + nBytesRead, err
 	}
+	nBytesRead += nBytesReadCur
 	valueLen := binary.BigEndian.Uint32(b4)
-	newOffSet += int64(bytesRead)
 
 	if valueLen&uint32(1<<31) != 0 {
 		item.isDeleted = true
 	} else {
 		valueBytes := make([]byte, valueLen)
-		if bytesRead, err = f.Read(valueBytes); err != nil {
-			return ssTableItem{}, 0, err
+		if nBytesReadCur, err = io.ReadFull(f, valueBytes); err != nil {
+			return ssTableItem{}, nBytesReadCur + nBytesRead, err
 		}
+		nBytesRead += nBytesReadCur
 		item.value = string(valueBytes)
-		newOffSet += int64(bytesRead)
 	}
-	return item, newOffSet, nil
+	return item, nBytesRead, nil
 }
