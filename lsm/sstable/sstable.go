@@ -48,21 +48,32 @@ type Config struct {
 	MaxSparseIndexMapGap int64
 }
 
+// SSTable is either in ModeInFile or ModeInMem
+//
+// In ModeInMem
+//   - memTable will be used for reads and writes
+//   - memTable size is tracked via memTableSize and if it goes beyond config.MaxMemTableSize then
+//     it will be converted to ModeInFile
+//
+// In ModeInFile
+//   - sparseIndex is lazily created.
+//   - SSTable is immutable i.e write operations will be disallowed
 type SSTable struct {
-	// Either the memTable will be present or the fileName will be present
-	// If the SS table is in file Mode, then sparseIndex is lazily created
-	// When its in file Mode, ss table is immutable i.e write operations will
-	// be disallowed
 	// TODO: read write locks
+
+	// ModeInMem related data structures
 	memTable     *btree.BTreeG[ssTableItem]
 	memTableSize int
 
+	// ModeInFile related data structures
 	sparseIndex *btree.BTreeG[sparseIndexItem]
 	fileName    string
 	footer      *ssTableFooterInfo
-	config      Config
 	readers     []*bufReaderWithSeek
-	tableMutex  sync.RWMutex
+
+	// General items
+	config     Config
+	tableMutex sync.RWMutex
 }
 
 type sparseIndexItem struct {
