@@ -20,6 +20,8 @@ const (
 const DefaultMaxMemTableSize = int64(32 * 1024 * 1024)
 const DefaultSparseIndexMaxGap = int64(128 * 1024)
 
+// === bufReaderWithSeek start
+
 type bufReaderWithSeek struct {
 	*bufio.Reader
 	raw  io.ReadWriteSeeker
@@ -37,6 +39,70 @@ func (s *bufReaderWithSeek) Seek(offset int64, whence int) (newOffset int64, err
 	s.Reset(s.raw)
 	return newOffset, nil
 }
+
+// === bufReaderWithSeek end
+// === sparseIndexItem begin
+
+type sparseIndexItem struct {
+	key    string
+	offset int64
+}
+
+func sparseIndexItemLess(i1, i2 sparseIndexItem) bool {
+	return i1.key < i2.key
+}
+
+// === sparseIndexItem end
+// === ssTableItem begin
+
+type ssTableItem struct {
+	key       []byte
+	value     []byte
+	isDeleted bool
+}
+
+func (item *ssTableItem) size() int {
+	return len(item.key) + len(item.value) + 1
+}
+
+func ssTableItemLess(i1, i2 ssTableItem) bool {
+	return bytes.Compare(i1.key, i2.key) < 0
+}
+
+// === ssTableItem end
+// === ssTableItemDisk begin
+
+type ssTableItemDisk struct {
+	key       []byte
+	value     []byte
+	keylen    int
+	valuelen  int
+	isDeleted bool
+}
+
+func (item *ssTableItemDisk) getKeySlice() []byte {
+	return item.key[:item.keylen]
+}
+
+func (item *ssTableItemDisk) getValueSlice() []byte {
+	return item.value[:item.valuelen]
+}
+
+func (item *ssTableItemDisk) setKeyLen(keyLen int) {
+	item.keylen = keyLen
+	if len(item.key) < item.keylen {
+		item.value = make([]byte, item.keylen)
+	}
+}
+
+func (item *ssTableItemDisk) setValueLen(valueLen int) {
+	item.valuelen = valueLen
+	if len(item.value) < item.valuelen {
+		item.value = make([]byte, item.valuelen)
+	}
+}
+
+// === ssTableItemDisk end
 
 type ssTableFooterInfo struct {
 	numDataBytes        int64
@@ -76,66 +142,12 @@ type SSTable struct {
 	tableMutex sync.RWMutex
 }
 
-type sparseIndexItem struct {
-	key    string
-	offset int64
-}
-
 func createEmptyReaders(cnt int) []*bufReaderWithSeek {
 	ret := make([]*bufReaderWithSeek, cnt)
 	for i := 0; i < cnt; i++ {
 		ret[i] = &bufReaderWithSeek{lock: &sync.Mutex{}}
 	}
 	return ret
-}
-
-func sparseIndexItemLess(i1, i2 sparseIndexItem) bool {
-	return i1.key < i2.key
-}
-
-type ssTableItem struct {
-	key       []byte
-	value     []byte
-	isDeleted bool
-}
-
-type ssTableItemDisk struct {
-	key       []byte
-	value     []byte
-	keylen    int
-	valuelen  int
-	isDeleted bool
-}
-
-func (item *ssTableItemDisk) getKeySlice() []byte {
-	return item.key[:item.keylen]
-}
-
-func (item *ssTableItemDisk) getValueSlice() []byte {
-	return item.value[:item.valuelen]
-}
-
-func (item *ssTableItemDisk) setKeyLen(keyLen int) {
-	item.keylen = keyLen
-	if len(item.key) < item.keylen {
-		item.value = make([]byte, item.keylen)
-	}
-}
-
-func (item *ssTableItemDisk) setValueLen(valueLen int) {
-	item.valuelen = valueLen
-	if len(item.value) < item.valuelen {
-		item.value = make([]byte, item.valuelen)
-	}
-}
-
-func (item *ssTableItem) size() int {
-	return len(item.key) + len(item.value) + 1
-
-}
-
-func ssTableItemLess(i1, i2 ssTableItem) bool {
-	return bytes.Compare(i1.key, i2.key) < 0
 }
 
 func NewFromFile(name string) SSTable {
@@ -244,7 +256,7 @@ func (table *SSTable) ensureSparseIndex() error {
 		return err
 	}
 	for curIndex < sparseIndexEnd {
-		item, nBytesRead, err := table.nextSparseIndexEntry(f)
+		item, nBytesRead, err := table.nextSparseIndexItemFromFile(f)
 		if err != nil {
 			return err
 		}
@@ -301,7 +313,7 @@ func (table *SSTable) getFromDisk(key string) (value string, ok bool) {
 		isDeleted: false,
 	}
 	for offset < table.footer.numDataBytes {
-		if nBytesRead, err := table.nextDiskEntry(f, keyBytes, &item); err != nil {
+		if nBytesRead, err := table.nextSStableItemFromFile(f, keyBytes, &item); err != nil {
 			return err.Error(), false
 		} else if cmp := bytes.Compare(item.getKeySlice(), keyBytes); cmp == 0 {
 			// match
@@ -424,7 +436,9 @@ func (table *SSTable) ConvertToSegmentFile() error {
 	return err
 }
 
-func (table *SSTable) nextSparseIndexEntry(f *bufReaderWithSeek) (item sparseIndexItem, bytesRead int, err error) {
+func (table *SSTable) nextSparseIndexItemFromFile(
+	f *bufReaderWithSeek,
+) (item sparseIndexItem, bytesRead int, err error) {
 	var bytesReadCur int
 	bytesRead = 0
 	b8 := make([]byte, 8)
@@ -450,9 +464,11 @@ func (table *SSTable) nextSparseIndexEntry(f *bufReaderWithSeek) (item sparseInd
 	return item, bytesRead, nil
 }
 
-// nextDiskEntry reads the next sstable item from disk. It returns the item value only if the key matches forKey.
-// This will save some reads from disk.
-func (table *SSTable) nextDiskEntry(f *bufReaderWithSeek, forKey []byte, item *ssTableItemDisk) (nBytesRead int, err error) {
+// nextSStableItemFromFile reads the next sstable item from disk. It returns the item value only if
+// the key matches forKey. This will save some reads from disk.
+func (table *SSTable) nextSStableItemFromFile(
+	f *bufReaderWithSeek, forKey []byte, item *ssTableItemDisk,
+) (nBytesRead int, err error) {
 	nBytesReadCur := 0
 	nBytesRead = 0
 	b4 := make([]byte, 4)
