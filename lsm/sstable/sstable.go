@@ -4,12 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"github.com/google/btree"
 	"io"
 	"math/rand"
 	"os"
 	"sync"
+	"yesteapea.com/lsm/tree"
 )
 
 const (
@@ -75,30 +75,30 @@ func ssTableItemLess(i1, i2 ssTableItem) bool {
 type ssTableItemDisk struct {
 	key       []byte
 	value     []byte
-	keylen    int
-	valuelen  int
+	keyLen    int
+	valueLen  int
 	isDeleted bool
 }
 
 func (item *ssTableItemDisk) getKeySlice() []byte {
-	return item.key[:item.keylen]
+	return item.key[:item.keyLen]
 }
 
 func (item *ssTableItemDisk) getValueSlice() []byte {
-	return item.value[:item.valuelen]
+	return item.value[:item.valueLen]
 }
 
 func (item *ssTableItemDisk) setKeyLen(keyLen int) {
-	item.keylen = keyLen
-	if len(item.key) < item.keylen {
-		item.value = make([]byte, item.keylen)
+	item.keyLen = keyLen
+	if len(item.key) < item.keyLen {
+		item.value = make([]byte, item.keyLen)
 	}
 }
 
 func (item *ssTableItemDisk) setValueLen(valueLen int) {
-	item.valuelen = valueLen
-	if len(item.value) < item.valuelen {
-		item.value = make([]byte, item.valuelen)
+	item.valueLen = valueLen
+	if len(item.value) < item.valueLen {
+		item.value = make([]byte, item.valueLen)
 	}
 }
 
@@ -115,6 +115,10 @@ type Config struct {
 }
 
 // SSTable is either in ModeInFile or ModeInMem
+//
+// TODO: SStable is supposed to the on disk file + related in mem
+// datastructures. The inmem mode here is supposed to be purely
+// handled by lsmtree's memtable.
 //
 // In ModeInMem
 //   - memTable will be used for reads and writes
@@ -179,9 +183,9 @@ func (table *SSTable) Mode() int32 {
 	}
 }
 
-func (table *SSTable) putInternal(item ssTableItem) error {
+func (table *SSTable) putInternal(item ssTableItem) tree.DbError {
 	if table.Mode() != ModeInMem {
-		return errors.New("RO SSTtable")
+		return tree.NewDbError("RO SSTtable", tree.ROTable)
 	}
 	table.tableMutex.Lock()
 	defer table.tableMutex.Unlock()
@@ -194,57 +198,57 @@ func (table *SSTable) putInternal(item ssTableItem) error {
 	if int64(table.memTableSize) > table.config.MaxMemTableSize {
 		return table.ConvertToSegmentFile()
 	}
-	return nil
+	return tree.NoError
 }
 
-func (table *SSTable) Put(key, value string) error {
+func (table *SSTable) Put(key, value string) tree.DbError {
 	return table.putInternal(ssTableItem{key: []byte(key), value: []byte(value)})
 }
 
-func (table *SSTable) Delete(key string) error {
+func (table *SSTable) Delete(key string) tree.DbError {
 	return table.putInternal(ssTableItem{key: []byte(key), isDeleted: true})
 }
 
 // setupFooter is expected by to called by ensureSparseIndex when
 // tableMutex is held
-func (table *SSTable) setupFooter(f *bufReaderWithSeek) (err error) {
+func (table *SSTable) setupFooter(f *bufReaderWithSeek) (dberr tree.DbError) {
 	if table.footer != nil {
-		return nil
+		return tree.NoError
 	}
 	b8 := make([]byte, 8)
-	if _, err = f.Seek(-16, io.SeekEnd); err != nil {
-		return err
+	if _, err := f.Seek(-16, io.SeekEnd); err != nil {
+		return tree.NewDbErrorRaw(err, tree.InternalError)
 	}
-	if _, err = f.Read(b8); err != nil {
-		return err
+	if _, err := f.Read(b8); err != nil {
+		return tree.NewDbErrorRaw(err, tree.InternalError)
 	}
 	numDataBytes := int64(binary.BigEndian.Uint64(b8))
 
-	if _, err = f.Read(b8); err != nil {
-		return err
+	if _, err := f.Read(b8); err != nil {
+		return tree.NewDbErrorRaw(err, tree.InternalError)
 	}
 	numSparseIndexBytes := int64(binary.BigEndian.Uint64(b8))
 	table.footer = &ssTableFooterInfo{
 		numDataBytes:        numDataBytes,
 		numSparseIndexBytes: numSparseIndexBytes,
 	}
-	return err
+	return tree.NoError
 }
 
-func (table *SSTable) ensureSparseIndex() error {
+func (table *SSTable) ensureSparseIndex() tree.DbError {
 	if table.sparseIndex != nil {
-		return nil
+		return tree.NoError
 	}
 	table.tableMutex.Lock()
 	defer table.tableMutex.Unlock()
 
 	f, err := table.getFileHandle()
 	defer f.lock.Unlock()
-	if err != nil {
+	if err.GetError() != nil {
 		return err
 	}
 	// Seek to the start of sparseIndex
-	if err = table.setupFooter(f); err != nil {
+	if err = table.setupFooter(f); err.GetError() != nil {
 		return err
 	}
 	sparseIndexStart, sparseIndexEnd :=
@@ -252,87 +256,87 @@ func (table *SSTable) ensureSparseIndex() error {
 		table.footer.numDataBytes+table.footer.numSparseIndexBytes
 	curIndex := sparseIndexStart
 	sparseIndex := btree.NewG(2, sparseIndexItemLess)
-	if _, err = f.Seek(curIndex, io.SeekStart); err != nil {
-		return err
+	if _, ferr := f.Seek(curIndex, io.SeekStart); ferr != nil {
+		return tree.NewDbErrorRaw(ferr, tree.InternalError)
 	}
 	for curIndex < sparseIndexEnd {
 		item, nBytesRead, err := table.nextSparseIndexItemFromFile(f)
-		if err != nil {
+		if err.GetError() != nil {
 			return err
 		}
 		curIndex += int64(nBytesRead)
 		sparseIndex.ReplaceOrInsert(item)
 	}
 	table.sparseIndex = sparseIndex
-	return nil
+	return tree.NoError
 }
 
-func (table *SSTable) getFileHandle() (ret *bufReaderWithSeek, err error) {
+func (table *SSTable) getFileHandle() (ret *bufReaderWithSeek, dberr tree.DbError) {
 	readerId := rand.Int() % len(table.readers)
 	table.readers[readerId].lock.Lock()
 	if table.readers[readerId].Reader == nil {
 		if rawFile, err := os.Open(table.fileName); err != nil {
-			return nil, err
+			return nil, tree.NewDbErrorRaw(err, tree.InternalError)
 		} else {
 			table.readers[readerId].Reader = bufio.NewReader(rawFile)
 			table.readers[readerId].raw = rawFile
 		}
 	}
-	return table.readers[readerId], nil
+	return table.readers[readerId], tree.NoError
 }
 
-// TODO: return error value as well.
-func (table *SSTable) getFromDisk(key string) (value string, ok bool) {
+// TODO: return tree.DbError value as well. Return value for get can be (value, err)
+func (table *SSTable) getFromDisk(key string) (value string, dberr tree.DbError) {
 	offset := int64(-1)
 	handle := func(item sparseIndexItem) bool {
 		offset = item.offset
 		return false // We dont need to iterate. We want offset of the largest entry <= key
 	}
-	if err := table.ensureSparseIndex(); err != nil {
-		return err.Error(), false
+	if err := table.ensureSparseIndex(); err.GetError() != nil {
+		return "", err
 	}
 	table.sparseIndex.DescendLessOrEqual(sparseIndexItem{key: key}, handle)
 	if offset < 0 {
 		// key is smaller than the smallest entry of the table.
-		return "", false
+		return "", tree.NewDbError("Not exists", tree.KeyNotExists)
 	}
 	f, err := table.getFileHandle()
 	defer f.lock.Unlock()
-	if err != nil {
-		return err.Error(), false
+	if err.GetError() != nil {
+		return "", err
 	}
-	if _, err = f.Seek(offset, io.SeekStart); err != nil {
-		return err.Error(), false
+	if _, ferr := f.Seek(offset, io.SeekStart); ferr != nil {
+		return "", tree.NewDbErrorRaw(ferr, tree.InternalError)
 	}
 	keyBytes := []byte(key)
 	item := ssTableItemDisk{
-		key:       make([]byte, 128),
-		value:     make([]byte, 128),
-		keylen:    0,
-		valuelen:  0,
+		key:       make([]byte, 128), // XXX: Should this be a config?
+		value:     make([]byte, 128), // XXX: Should this be a config?
+		keyLen:    0,
+		valueLen:  0,
 		isDeleted: false,
 	}
 	for offset < table.footer.numDataBytes {
-		if nBytesRead, err := table.nextSStableItemFromFile(f, keyBytes, &item); err != nil {
-			return err.Error(), false
+		if nBytesRead, err := table.nextSStableItemFromFile(f, keyBytes, &item); err.GetError() != nil {
+			return "", err
 		} else if cmp := bytes.Compare(item.getKeySlice(), keyBytes); cmp == 0 {
 			// match
 			if item.isDeleted {
-				return "Marked as deleted", false
+				return "", tree.NewDbError("Marked as deleted", tree.KeyNotExists)
 			} else {
-				return string(item.getValueSlice()), true
+				return string(item.getValueSlice()), tree.NoError
 			}
 		} else if cmp > 0 {
 			// We are past the current key
-			return string(item.getValueSlice()), false
+			return "", tree.NewDbError("Past the current key", tree.KeyNotExists)
 		} else {
 			offset += int64(nBytesRead)
 		}
 	}
-	return "End of DataSection", false
+	return "", tree.NewDbError("End of DataSection", tree.KeyNotExists)
 }
 
-func (table *SSTable) Get(key string) (value string, ok bool) {
+func (table *SSTable) Get(key string) (value string, dberr tree.DbError) {
 	if table.Mode() != ModeInMem {
 		return table.getFromDisk(key)
 	}
@@ -340,23 +344,22 @@ func (table *SSTable) Get(key string) (value string, ok bool) {
 	defer table.tableMutex.RUnlock()
 	existing, ok := table.memTable.Get(ssTableItem{key: []byte(key)})
 	if !ok {
-		return "", false
+		return "", tree.NewDbError("Not exists", tree.KeyNotExists)
 	} else if existing.isDeleted {
-		return "", false
+		return "", tree.NewDbError("Marked as deleted", tree.KeyNotExists)
 	} else {
-		return string(existing.value), true
+		return string(existing.value), tree.NoError
 	}
 }
 
-func (table *SSTable) ConvertToSegmentFile() error {
+func (table *SSTable) ConvertToSegmentFile() tree.DbError {
 	// TODO: Lock the datastructure here.
 	if table.Mode() == ModeInFile {
-		// XXX: Return an error?
-		return nil
+		return tree.NoError
 	}
 	fRaw, err := os.Create(table.fileName)
 	if err != nil {
-		return err
+		return tree.NewDbErrorRaw(err, tree.InternalError)
 	}
 	f := bufio.NewWriter(fRaw)
 	defer func() {
@@ -376,7 +379,7 @@ func (table *SSTable) ConvertToSegmentFile() error {
 	table.sparseIndex = btree.NewG(2, sparseIndexItemLess)
 	memTableHandle := func(item ssTableItem) bool {
 		binary.BigEndian.PutUint32(b4, uint32(len(item.key)))
-		// XXX: Handle the errors here correctly
+		// XXX: Handle the err here correctly
 		n1, err = f.Write(b4)
 		n2, err = f.Write(item.key)
 		valLengthAndIsDeleted := uint32(len(item.value))
@@ -399,7 +402,7 @@ func (table *SSTable) ConvertToSegmentFile() error {
 	// Persist the sparse index on disk
 	numSparseIndexBytes := int64(0)
 	sparseIndexHandle := func(item sparseIndexItem) bool {
-		// XXX: Handle the errors here correctly
+		// XXX: Handle the err here correctly
 		// Length of key
 		binary.BigEndian.PutUint32(b4, uint32(len(item.key)))
 		n1, err = f.Write(b4)
@@ -416,16 +419,16 @@ func (table *SSTable) ConvertToSegmentFile() error {
 	// Footer
 	binary.BigEndian.PutUint64(b8, uint64(numDataBytes))
 	if n1, err = f.Write(b8); err != nil {
-		return err
+		return tree.NewDbErrorRaw(err, tree.InternalError)
 	}
 	binary.BigEndian.PutUint64(b8, uint64(numSparseIndexBytes))
 	if n2, err = f.Write(b8); err != nil {
-		return err
+		return tree.NewDbErrorRaw(err, tree.InternalError)
 	}
 	table.memTable = nil
 	if err = fRaw.Close(); err != nil {
 		fRaw = nil
-		return err
+		return tree.NewDbErrorRaw(err, tree.InternalError)
 	}
 	table.footer = &ssTableFooterInfo{
 		numDataBytes:        numDataBytes,
@@ -433,75 +436,77 @@ func (table *SSTable) ConvertToSegmentFile() error {
 	}
 	f = nil
 	// f.close done by defer
-	return err
+	return tree.NoError
 }
 
 func (table *SSTable) nextSparseIndexItemFromFile(
 	f *bufReaderWithSeek,
-) (item sparseIndexItem, bytesRead int, err error) {
+) (item sparseIndexItem, bytesRead int, dberr tree.DbError) {
 	var bytesReadCur int
+	var err error
 	bytesRead = 0
 	b8 := make([]byte, 8)
 	b4 := make([]byte, 4)
 	if bytesReadCur, err = f.Read(b4); err != nil {
-		return sparseIndexItem{}, bytesReadCur + bytesRead, err
+		return sparseIndexItem{}, bytesReadCur + bytesRead, tree.NewDbErrorRaw(err, tree.InternalError)
 	}
 	bytesRead += bytesReadCur
 	keyLen := binary.BigEndian.Uint32(b4)
 
 	keyBytes := make([]byte, keyLen)
 	if bytesReadCur, err = f.Read(keyBytes); err != nil {
-		return sparseIndexItem{}, bytesReadCur + bytesRead, err
+		return sparseIndexItem{}, bytesReadCur + bytesRead, tree.NewDbErrorRaw(err, tree.InternalError)
 	}
 	bytesRead += bytesReadCur
 	item.key = string(keyBytes)
 
 	if bytesReadCur, err = f.Read(b8); err != nil {
-		return sparseIndexItem{}, bytesReadCur + bytesRead, err
+		return sparseIndexItem{}, bytesReadCur + bytesRead, tree.NewDbErrorRaw(err, tree.InternalError)
 	}
 	bytesRead += bytesReadCur
 	item.offset = int64(binary.BigEndian.Uint64(b8))
-	return item, bytesRead, nil
+	return item, bytesRead, tree.NoError
 }
 
 // nextSStableItemFromFile reads the next sstable item from disk. It returns the item value only if
 // the key matches forKey. This will save some reads from disk.
 func (table *SSTable) nextSStableItemFromFile(
 	f *bufReaderWithSeek, forKey []byte, item *ssTableItemDisk,
-) (nBytesRead int, err error) {
+) (nBytesRead int, dberr tree.DbError) {
 	nBytesReadCur := 0
 	nBytesRead = 0
 	b4 := make([]byte, 4)
+	var err error
 	if nBytesReadCur, err = io.ReadFull(f, b4); err != nil {
-		return nBytesReadCur + nBytesRead, err
+		return nBytesReadCur + nBytesRead, tree.NewDbErrorRaw(err, tree.InternalError)
 	}
 	nBytesRead += nBytesReadCur
 	item.setKeyLen(int(binary.BigEndian.Uint32(b4)))
 
 	if nBytesReadCur, err = io.ReadFull(f, item.getKeySlice()); err != nil {
-		return nBytesReadCur + nBytesRead, err
+		return nBytesReadCur + nBytesRead, tree.NewDbErrorRaw(err, tree.InternalError)
 	}
 	nBytesRead += nBytesReadCur
 
 	if nBytesReadCur, err = io.ReadFull(f, b4); err != nil {
-		return nBytesReadCur + nBytesRead, err
+		return nBytesReadCur + nBytesRead, tree.NewDbErrorRaw(err, tree.InternalError)
 	}
 	nBytesRead += nBytesReadCur
 	valueLen := binary.BigEndian.Uint32(b4)
 
 	if valueLen&uint32(1<<31) != 0 {
 		item.isDeleted = true
-	} else if bytes.Compare(item.key[:item.keylen], forKey) == 0 {
+	} else if bytes.Compare(item.key[:item.keyLen], forKey) == 0 {
 		item.setValueLen(int(valueLen))
 		if nBytesReadCur, err = io.ReadFull(f, item.getValueSlice()); err != nil {
-			return nBytesReadCur + nBytesRead, err
+			return nBytesReadCur + nBytesRead, tree.NewDbErrorRaw(err, tree.InternalError)
 		}
 		nBytesRead += nBytesReadCur
 	} else {
 		nBytesRead += int(valueLen)
 		if _, err = f.Discard(int(valueLen)); err != nil {
-			return 0, err
+			return 0, tree.NewDbErrorRaw(err, tree.InternalError)
 		}
 	}
-	return nBytesRead, nil
+	return nBytesRead, tree.NoError
 }

@@ -12,14 +12,14 @@ import (
 )
 
 func checkExists(t *testing.T, key, value string, sstable *SSTable) {
-	actualValue, ok := sstable.Get(key)
-	assert.Equal(t, true, ok, "for %s->%s", key, value)
+	actualValue, err := sstable.Get(key)
+	assert.Equal(t, true, err.Success(), "for %s->%s", key, value)
 	require.Equal(t, value, actualValue, "for %s->%s", key, value)
 }
 
 func checkNotExists(t *testing.T, key string, sstable *SSTable) {
-	_, ok := sstable.Get(key)
-	assert.Equal(t, ok, false)
+	_, err := sstable.Get(key)
+	assert.Equal(t, err.Success(), false)
 }
 
 func TestInMem(t *testing.T) {
@@ -33,28 +33,28 @@ func TestInMem(t *testing.T) {
 
 	// add key1 -> value1
 	err := inMem.Put("key1", "value1")
-	assert.Equal(t, err, nil)
+	assert.Equal(t, err.Success(), true)
 
 	// Check key1 -> value1
 	checkExists(t, "key1", "value1", &inMem)
 
 	// Delete key1
 	err = inMem.Delete("key1")
-	assert.Equal(t, err, nil)
+	assert.Equal(t, err.Success(), true)
 
 	// key1 should not exist
 	checkNotExists(t, "key1", &inMem)
 
 	// Put key1 -> value2
 	err = inMem.Put("key1", "value2")
-	assert.Equal(t, err, nil)
+	assert.Equal(t, err.Success(), true)
 
 	// Verify key1 -> value2
 	checkExists(t, "key1", "value2", &inMem)
 
 	// dump
 	err = inMem.ConvertToSegmentFile()
-	assert.Equal(t, err, nil)
+	assert.Equal(t, err.Success(), true)
 }
 
 type TemplateTestLargeRes struct {
@@ -80,7 +80,7 @@ func TemplateTestLarge(
 		key := fmt.Sprintf("key%v", i)
 		value := fmt.Sprintf("value%v", i)
 		err := inMem.Put(key, value)
-		assert.Equal(t, err, nil)
+		assert.Equal(t, err.Success(), true)
 		if i%100000 == 1 {
 			t.Logf("Put %v entries in %v", i, time.Now().Sub(start))
 		}
@@ -88,7 +88,7 @@ func TemplateTestLarge(
 	t.Logf("Put all entries in %v", time.Now().Sub(start))
 	flushStart := time.Now()
 	err := inMem.ConvertToSegmentFile()
-	assert.Equal(t, err, nil)
+	assert.Equal(t, err.Success(), true)
 	t.Logf("ConvertToSegmentFile done in %v", time.Now().Sub(flushStart))
 
 	readStart := time.Now()
