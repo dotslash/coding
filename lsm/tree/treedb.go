@@ -36,18 +36,19 @@ var NoError = DbError{
 	error:     nil,
 }
 
-func NewDbError(message string, errorType DbErrorType) DbError {
-	return DbError{
-		ErrorType: errorType,
-		error:     errors.New(message),
-	}
+func NewError(message string, errorType DbErrorType) DbError {
+	return NewRawError(errors.New(message), errorType)
 }
 
-func NewDbErrorRaw(err error, errorType DbErrorType) DbError {
+func NewRawError(err error, errorType DbErrorType) DbError {
 	return DbError{
 		ErrorType: errorType,
 		error:     err,
 	}
+}
+
+func NewInternalError(err error) DbError {
+	return NewRawError(err, InternalError)
 }
 
 type treedb interface {
