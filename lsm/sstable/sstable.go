@@ -292,7 +292,6 @@ func (table *SSTable) getFileHandle() (ret *bufReaderWithSeek, dberr tree.DbErro
 	return table.readers[readerId], tree.NoError
 }
 
-// TODO: return tree.DbError value as well. Return value for get can be (value, err)
 func (table *SSTable) getFromDisk(key string) (value string, dberr tree.DbError) {
 	offset := int64(-1)
 	handle := func(item sparseIndexItem) bool {
