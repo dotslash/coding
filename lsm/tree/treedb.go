@@ -8,10 +8,19 @@ import (
 type DbErrorType string
 
 const (
-	KeyNotExists  DbErrorType = "KeyNotExists"
-	ROTable       DbErrorType = "ROTable"
-	Success       DbErrorType = "Success"
-	InternalError DbErrorType = "InternalError"
+	KeyNotExists       DbErrorType = "KeyNotExists"
+	KeyMarkedAsDeleted DbErrorType = "KeyMarkedAsDeleted"
+	ROTable            DbErrorType = "ROTable"
+	Success            DbErrorType = "Success"
+	InternalError      DbErrorType = "InternalError"
+)
+
+type KVStoreMode string
+
+const (
+	ModeInMem  KVStoreMode = "ModeInMem"
+	ModeInFile KVStoreMode = "ModeInFile"
+	ModeHybrid KVStoreMode = "ModeHybrid"
 )
 
 type DbError struct {
@@ -20,6 +29,9 @@ type DbError struct {
 }
 
 func (err *DbError) Error() string {
+	if err.error == nil {
+		return "No Error"
+	}
 	return fmt.Sprintf("%s: %s", err.ErrorType, err.error.Error())
 }
 
@@ -51,7 +63,8 @@ func NewInternalError(err error) DbError {
 	return NewRawError(err, InternalError)
 }
 
-type treedb interface {
+type KVStore interface {
+	Mode() KVStoreMode
 	Put(key, value string) DbError
 	Delete(key string) DbError
 	Get(key string) (value string, err DbError)

@@ -6,7 +6,7 @@ import (
 	"github.com/google/uuid"
 	"os"
 	"strings"
-	"yesteapea.com/lsm/sstable"
+	"yesteapea.com/lsm/tree"
 )
 
 func main() {
@@ -18,11 +18,11 @@ func main() {
 	//    /main load <path>
 	mode := os.Args[1]
 	filePath := os.Args[2]
-	var table sstable.SSTable
+	var table tree.SSTable
 	if mode == "new" {
 		filePath = filePath + uuid.NewString() + ".dump"
 		fmt.Println("Will flush the sstable to", filePath)
-		table = sstable.EmptyWithDefaultConfig(filePath)
+		table = tree.EmptyWithDefaultConfig(filePath)
 		defer func() {
 			fmt.Println("Flushing to disk at", filePath)
 			err := table.ConvertToSegmentFile()
@@ -33,7 +33,7 @@ func main() {
 			}
 		}()
 	} else {
-		table = sstable.NewFromFile(filePath)
+		table = tree.NewFromFile(filePath)
 	}
 	for {
 		fmt.Print("Input: ")
