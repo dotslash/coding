@@ -18,11 +18,12 @@ func main() {
 	//    /main load <path>
 	mode := os.Args[1]
 	filePath := os.Args[2]
-	var table tree.SSTable
+	var table *tree.SSTable
 	if mode == "new" {
 		filePath = filePath + uuid.NewString() + ".dump"
 		fmt.Println("Will flush the sstable to", filePath)
-		table = tree.EmptyWithDefaultConfig(filePath)
+		_table := tree.EmptyWithDefaultConfig(filePath)
+		table = &_table
 		defer func() {
 			fmt.Println("Flushing to disk at", filePath)
 			err := table.ConvertToSegmentFile()
@@ -33,7 +34,11 @@ func main() {
 			}
 		}()
 	} else {
-		table = tree.NewFromFile(filePath)
+		var err error
+		table, err = tree.NewFromFile(filePath)
+		if err != nil {
+			panic(err)
+		}
 	}
 	for {
 		fmt.Print("Input: ")

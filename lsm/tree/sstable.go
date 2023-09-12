@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"os"
 	"sync"
+	"yesteapea.com/lsm/filter"
 )
 
 const DefaultMaxMemTableSize = int64(32 * 1024 * 1024)
@@ -16,6 +17,7 @@ const DefaultSparseIndexMaxGap = int64(16 * 1024)
 
 const (
 	sstableErrNotExists                 = "Not exists"
+	sstableErrNotExistsCuckoo           = "Not exists: Cuckoo"
 	sstableErrNotExistsMarkedAsDeleted  = "Marked as deleted"
 	sstableErrNotExistsEndOfDataSection = "end of DataSection"
 	sstableErrNotExistsPastCurrentKey   = "past the current key"
@@ -141,6 +143,13 @@ type SSTable struct {
 	fileName    string
 	footer      *ssTableFooterInfo
 	readers     []*bufReaderWithSeek
+	// filter will be used a cheap check to determine if a key is present in a sstable
+	// It will have some false positives. But it must never have false negatives
+	// Bloom filter/ cuckoo filter would work here.
+	// filter will be used when the SSTable is file and is immutable. So the filter also will be
+	// immutable. We still need a filterLock because the current implementation is not thread safe
+	// for reads.
+	filter filter.Filter
 
 	// General items
 	config     SSTableConfig
@@ -155,11 +164,19 @@ func createEmptyReaders(cnt int) []*bufReaderWithSeek {
 	return ret
 }
 
-func NewFromFile(name string) SSTable {
-	return SSTable{
+func NewFromFile(name string) (*SSTable, error) {
+	ret := SSTable{
 		fileName: name,
 		readers:  createEmptyReaders(16),
 	}
+	var err error
+	ret.filter, err = loadROFilterFromFile(ret.cuckooFileName())
+	if err != nil {
+		return nil, err
+	} else {
+		return &ret, nil
+	}
+
 }
 
 func EmptyWithDefaultConfig(fileName string) SSTable {
@@ -287,6 +304,14 @@ func (table *SSTable) getFileHandle() (ret *bufReaderWithSeek, dberr DbError) {
 }
 
 func (table *SSTable) getFromDisk(key string) (value string, dberr DbError) {
+	keyBytes := []byte(key)
+	if table.filter != nil {
+		test := table.filter.Lookup(keyBytes)
+		if !test {
+			return "", NewError(sstableErrNotExistsCuckoo, KeyNotExists)
+		}
+	}
+
 	offset := int64(-1)
 	handle := func(item sparseIndexItem) bool {
 		offset = item.offset
@@ -308,7 +333,6 @@ func (table *SSTable) getFromDisk(key string) (value string, dberr DbError) {
 	if _, ferr := f.Seek(offset, io.SeekStart); ferr != nil {
 		return "", NewInternalError(ferr)
 	}
-	keyBytes := []byte(key)
 	item := ssTableItemDisk{
 		key:       make([]byte, 128), // XXX: Should this be a config?
 		value:     make([]byte, 128), // XXX: Should this be a config?
@@ -351,12 +375,24 @@ func (table *SSTable) Get(key string) (value string, dberr DbError) {
 		return string(existing.value), NoError
 	}
 }
+func (table *SSTable) cuckooFileName() string {
+	return table.fileName + ".filter"
+}
 
 func (table *SSTable) ConvertToSegmentFile() DbError {
 	// TODO: Lock the datastructure here.
 	if table.Mode() == ModeInFile {
 		return NoError
 	}
+
+	var err error
+	// Create filter filter
+	if table.filter, err = newROFilterFromMem(table.memTable); err != nil {
+		return NewInternalError(err)
+	} else if err = saveFilterToFile(table.cuckooFileName(), table.filter); err != nil {
+		return NewInternalError(err)
+	}
+	// Actual ss table
 	fRaw, err := os.Create(table.fileName)
 	if err != nil {
 		return NewInternalError(err)

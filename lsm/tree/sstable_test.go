@@ -53,7 +53,7 @@ func TemplateTestLargeSStable(
 	sstable := Empty(fName, config)
 	start := time.Now()
 
-	ops, inmem, keys := generateOps(1000*1000, 0.9)
+	ops, inmem, keys := generateOps(1000*1000, 0.1)
 	for i := 0; i < len(ops); i++ {
 		op := ops[i]
 		err := sstable.Put(op.key, op.value)

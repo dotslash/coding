@@ -61,7 +61,7 @@ func TemplateTestLarge(
 	for i := 0; i < numSStables*sstableSize; i++ {
 		op := ops[i]
 		err := table.Put(op.key, op.value)
-		assert.Equal(t, err, NoError)
+		assert.Equal(t, err, NoError, err.Error())
 
 		if i > sstableSize && i%sstableSize == 0 {
 			t.Logf("Put %v entries in %v", i, time.Now().Sub(start))
@@ -74,10 +74,16 @@ func TemplateTestLarge(
 	t.Logf("Put all entries in %v", time.Now().Sub(start))
 
 	readDuration, numReads := readExistingEntries(t, readConcurrency, maxTimeForReads, 1000*1000, keys, inmem, &table)
+	nonReadDuration, numNonReads := readNonExistingEntries(t, readConcurrency, maxTimeForReads, 1000*1000, keys, &table)
+
 	t.Logf("Read %v entries in %v", numReads, readDuration)
+	t.Logf("Read %v non existing entries in %v", numNonReads, nonReadDuration)
+
 	return TemplateTestLargeRes{
 		readDuration:    readDuration,
 		numReads:        numReads,
+		nonReadDuration: nonReadDuration,
+		numNonReads:     numNonReads,
 		readConcurrency: readConcurrency,
 	}
 
