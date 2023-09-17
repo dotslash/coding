@@ -43,12 +43,9 @@ type memTableConfig struct {
 	MaxSparseIndexMapGap int64
 }
 
-// memTable will be used for reads and writes
-// memTable size is tracked via memTableSize and if it goes beyond config.MaxMemTableSize then
+// memTable supports and reads and writes. It is made threadsafe by acquiring mutexes appropriately. If the table size
+// goes beyond whats configured in config, it will throw an error. Size is tracked via dataSize.
 type memTable struct {
-	// TODO: read write locks
-
-	// ModeInMem related data structures
 	data     *btree.BTreeG[memTableItem]
 	dataSize int
 	// General items

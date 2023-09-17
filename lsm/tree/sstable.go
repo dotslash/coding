@@ -24,7 +24,9 @@ const (
 
 type bufReaderWithSeek struct {
 	*bufio.Reader
-	raw  io.ReadWriteSeeker
+	raw io.ReadWriteSeeker
+	// The reader is not thread safe by itself. User of this util must a hold
+	// this lock and operate on the reader.
 	lock sync.Locker
 }
 
@@ -44,12 +46,12 @@ func (s *bufReaderWithSeek) Seek(offset int64, whence int) (newOffset int64, err
 
 // === sparseIndexItem begin
 type sparseIndexItem struct {
-	key    string
+	key    []byte
 	offset int64
 }
 
 func sparseIndexItemLess(i1, i2 sparseIndexItem) bool {
-	return i1.key < i2.key
+	return bytes.Compare(i1.key, i2.key) < 0
 }
 
 // === sparseIndexItem end
@@ -92,10 +94,8 @@ type ssTableFooterInfo struct {
 	numSparseIndexBytes int64
 }
 
+// SSTable is an immutable structure backed by data on disk. It is thread-safe.
 type SSTable struct {
-	// TODO: read write locks
-
-	// ModeInFile related data structures
 	sparseIndex *btree.BTreeG[sparseIndexItem]
 	fileName    string
 	footer      *ssTableFooterInfo
@@ -147,30 +147,27 @@ func (table *SSTable) Delete(_ string) DbError {
 	return NewError("RO SSTtable", ROTable)
 }
 
-// setupFooter is expected by to called by ensureSparseIndex when
+// parseFooter is expected by to called by ensureSparseIndex when
 // tableMutex is held
-func (table *SSTable) setupFooter(f *bufReaderWithSeek) (dberr DbError) {
-	if table.footer != nil {
-		return NoError
-	}
+func parseFooter(f *bufReaderWithSeek) (footer *ssTableFooterInfo, dberr DbError) {
 	b8 := make([]byte, 8)
 	if _, err := f.Seek(-16, io.SeekEnd); err != nil {
-		return NewInternalError(err)
+		return nil, NewInternalError(err)
 	}
 	if _, err := f.Read(b8); err != nil {
-		return NewInternalError(err)
+		return nil, NewInternalError(err)
 	}
 	numDataBytes := int64(binary.BigEndian.Uint64(b8))
 
 	if _, err := f.Read(b8); err != nil {
-		return NewInternalError(err)
+		return nil, NewInternalError(err)
 	}
 	numSparseIndexBytes := int64(binary.BigEndian.Uint64(b8))
-	table.footer = &ssTableFooterInfo{
+	footer = &ssTableFooterInfo{
 		numDataBytes:        numDataBytes,
 		numSparseIndexBytes: numSparseIndexBytes,
 	}
-	return NoError
+	return footer, NoError
 }
 
 func (table *SSTable) ensureSparseIndex() DbError {
@@ -180,13 +177,13 @@ func (table *SSTable) ensureSparseIndex() DbError {
 	table.tableMutex.Lock()
 	defer table.tableMutex.Unlock()
 
-	f, err := table.getFileHandle()
+	f, err := table.getFileHandleAndLock()
 	defer f.lock.Unlock()
 	if err.GetError() != nil {
 		return err
 	}
 	// Seek to the start of sparseIndex
-	if err = table.setupFooter(f); err.GetError() != nil {
+	if table.footer, err = parseFooter(f); err.GetError() != nil {
 		return err
 	}
 	sparseIndexStart, sparseIndexEnd :=
@@ -209,7 +206,7 @@ func (table *SSTable) ensureSparseIndex() DbError {
 	return NoError
 }
 
-func (table *SSTable) getFileHandle() (ret *bufReaderWithSeek, dberr DbError) {
+func (table *SSTable) getFileHandleAndLock() (ret *bufReaderWithSeek, dberr DbError) {
 	readerId := rand.Int() % len(table.readers)
 	table.readers[readerId].lock.Lock()
 	if table.readers[readerId].Reader == nil {
@@ -240,12 +237,12 @@ func (table *SSTable) Get(key string) (value string, dberr DbError) {
 	if err := table.ensureSparseIndex(); err.GetError() != nil {
 		return "", err
 	}
-	table.sparseIndex.DescendLessOrEqual(sparseIndexItem{key: key}, handle)
+	table.sparseIndex.DescendLessOrEqual(sparseIndexItem{key: keyBytes}, handle)
 	if offset < 0 {
 		// key is smaller than the smallest entry of the table.
 		return "", NewError(sstableErrNotExists, KeyNotExists)
 	}
-	f, err := table.getFileHandle()
+	f, err := table.getFileHandleAndLock()
 	defer f.lock.Unlock()
 	if err.GetError() != nil {
 		return "", err
@@ -335,7 +332,7 @@ func memtableToSSTable(filename string, memtable *memTable) (*SSTable, DbError) 
 		numDataBytes += int64(n1 + n2 + n3 + n4)
 		if lastSparseIndexUpdateOffset < 0 ||
 			numDataBytes >= memtable.config.MaxSparseIndexMapGap+lastSparseIndexUpdateOffset {
-			sparseIndex.ReplaceOrInsert(sparseIndexItem{key: string(item.key), offset: oldNumDataBytes})
+			sparseIndex.ReplaceOrInsert(sparseIndexItem{key: item.key, offset: oldNumDataBytes})
 			lastSparseIndexUpdateOffset = oldNumDataBytes
 		}
 		return true
@@ -381,7 +378,6 @@ func memtableToSSTable(filename string, memtable *memTable) (*SSTable, DbError) 
 		footer:      footer,
 		readers:     createEmptyReaders(16),
 		filter:      filter,
-		tableMutex:  sync.RWMutex{},
 	}
 	return ret, NoError
 }
@@ -405,7 +401,7 @@ func (table *SSTable) nextSparseIndexItemFromFile(
 		return sparseIndexItem{}, bytesReadCur + bytesRead, NewInternalError(err)
 	}
 	bytesRead += bytesReadCur
-	item.key = string(keyBytes)
+	item.key = keyBytes
 
 	if bytesReadCur, err = f.Read(b8); err != nil {
 		return sparseIndexItem{}, bytesReadCur + bytesRead, NewInternalError(err)

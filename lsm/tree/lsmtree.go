@@ -7,9 +7,8 @@ import (
 )
 
 type LSMTree struct {
-	// XXX: memtable should just be a btree or skip list and not sstable.SSTable
-	memtable   *memTable
-	diskTables []*SSTable
+	memTable *memTable
+	ssTables []*SSTable
 
 	tableMutex   sync.RWMutex
 	dataLocation string
@@ -20,33 +19,33 @@ func (table *LSMTree) Mode() KVStoreMode {
 }
 
 func (table *LSMTree) flushToDisk() DbError {
-	if table.memtable == nil {
+	if table.memTable == nil {
 		return NoError
 	}
 	flushLocation := fmt.Sprintf("%v/sstable_%v", table.dataLocation, time.Now().UnixMicro())
-	flushed, err := memtableToSSTable(flushLocation, table.memtable)
+	flushed, err := memtableToSSTable(flushLocation, table.memTable)
 	if err.error != nil {
 		return err
 	}
-	table.diskTables = append(table.diskTables, flushed)
+	table.ssTables = append(table.ssTables, flushed)
 	return NoError
 }
 
 func (table *LSMTree) getInMem() (*memTable, DbError) {
-	if table.memtable != nil && !table.memtable.isFull() {
-		return table.memtable, NoError
+	if table.memTable != nil && !table.memTable.isFull() {
+		return table.memTable, NoError
 	}
 
 	table.tableMutex.Lock()
 	defer table.tableMutex.Unlock()
-	if table.memtable != nil && !table.memtable.isFull() {
-		return table.memtable, NoError
+	if table.memTable != nil && !table.memTable.isFull() {
+		return table.memTable, NoError
 	}
 	if err := table.flushToDisk(); err.error != nil {
 		return nil, NoError
 	}
-	table.memtable = NewMemTable(defaultMemTableConfig)
-	return table.memtable, NoError
+	table.memTable = NewMemTable(defaultMemTableConfig)
+	return table.memTable, NoError
 }
 
 func (table *LSMTree) Put(key, value string) DbError {
@@ -72,8 +71,8 @@ func (table *LSMTree) Get(key string) (value string, err DbError) {
 	} else if value, err = currentTable.Get(key); err.Success() || err.ErrorType == KeyMarkedAsDeleted {
 		return value, err
 	}
-	for i := len(table.diskTables) - 1; i >= 0; i-- {
-		currentTable := table.diskTables[i]
+	for i := len(table.ssTables) - 1; i >= 0; i-- {
+		currentTable := table.ssTables[i]
 		value, err = currentTable.Get(key)
 		if err.Success() || err.ErrorType == KeyMarkedAsDeleted {
 			return value, err
