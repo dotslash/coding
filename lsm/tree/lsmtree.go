@@ -8,7 +8,7 @@ import (
 
 type LSMTree struct {
 	// XXX: memtable should just be a btree or skip list and not sstable.SSTable
-	memtable   *SSTable
+	memtable   *memTable
 	diskTables []*SSTable
 
 	tableMutex   sync.RWMutex
@@ -19,43 +19,61 @@ func (table *LSMTree) Mode() KVStoreMode {
 	return ModeHybrid
 }
 
-func (table *LSMTree) getInMem() *SSTable {
-	if table.memtable != nil && table.memtable.Mode() == ModeInMem {
-		return table.memtable
+func (table *LSMTree) flushToDisk() DbError {
+	if table.memtable == nil {
+		return NoError
+	}
+	flushLocation := fmt.Sprintf("%v/sstable_%v", table.dataLocation, time.Now().UnixMicro())
+	flushed, err := memtableToSSTable(flushLocation, table.memtable)
+	if err.error != nil {
+		return err
+	}
+	table.diskTables = append(table.diskTables, flushed)
+	return NoError
+}
+
+func (table *LSMTree) getInMem() (*memTable, DbError) {
+	if table.memtable != nil && !table.memtable.isFull() {
+		return table.memtable, NoError
 	}
 
 	table.tableMutex.Lock()
 	defer table.tableMutex.Unlock()
-	if table.memtable != nil && table.memtable.Mode() == ModeInMem {
-		return table.memtable
+	if table.memtable != nil && !table.memtable.isFull() {
+		return table.memtable, NoError
 	}
-	if table.memtable != nil && table.memtable.Mode() != ModeInMem {
-		table.diskTables = append(table.diskTables, table.memtable)
-		table.memtable = nil
+	if err := table.flushToDisk(); err.error != nil {
+		return nil, NoError
 	}
-	flushLocation := fmt.Sprintf("%v/sstable_%v", table.dataLocation, time.Now().UnixMicro())
-	memtable := EmptyWithDefaultConfig(flushLocation)
-	table.memtable = &memtable
-	return table.memtable
+	table.memtable = NewMemTable(defaultMemTableConfig)
+	return table.memtable, NoError
 }
 
 func (table *LSMTree) Put(key, value string) DbError {
-	return table.getInMem().Put(key, value)
+	if table, err := table.getInMem(); err.error != nil {
+		return err
+	} else {
+		return table.Put(key, value)
+	}
+
 }
 
 func (table *LSMTree) Delete(key string) DbError {
-	return table.getInMem().Delete(key)
+	if table, err := table.getInMem(); err.error != nil {
+		return err
+	} else {
+		return table.Delete(key)
+	}
 }
 
 func (table *LSMTree) Get(key string) (value string, err DbError) {
-	currentTable := table.getInMem()
-
-	value, err = currentTable.Get(key)
-	if err.Success() || err.ErrorType == KeyMarkedAsDeleted {
+	if currentTable, err := table.getInMem(); err.error != nil {
+		return "", err
+	} else if value, err = currentTable.Get(key); err.Success() || err.ErrorType == KeyMarkedAsDeleted {
 		return value, err
 	}
 	for i := len(table.diskTables) - 1; i >= 0; i-- {
-		currentTable = table.diskTables[i]
+		currentTable := table.diskTables[i]
 		value, err = currentTable.Get(key)
 		if err.Success() || err.ErrorType == KeyMarkedAsDeleted {
 			return value, err

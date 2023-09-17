@@ -12,12 +12,9 @@ import (
 	"yesteapea.com/lsm/filter"
 )
 
-const DefaultMaxMemTableSize = int64(32 * 1024 * 1024)
-const DefaultSparseIndexMaxGap = int64(16 * 1024)
-
 const (
-	sstableErrNotExists                 = "Not exists"
-	sstableErrNotExistsCuckoo           = "Not exists: Cuckoo"
+	sstableErrNotExists                 = "not exists"
+	sstableErrNotExistsFilter           = "not exists: Filter"
 	sstableErrNotExistsMarkedAsDeleted  = "Marked as deleted"
 	sstableErrNotExistsEndOfDataSection = "end of DataSection"
 	sstableErrNotExistsPastCurrentKey   = "past the current key"
@@ -44,8 +41,8 @@ func (s *bufReaderWithSeek) Seek(offset int64, whence int) (newOffset int64, err
 }
 
 // === bufReaderWithSeek end
-// === sparseIndexItem begin
 
+// === sparseIndexItem begin
 type sparseIndexItem struct {
 	key    string
 	offset int64
@@ -56,25 +53,8 @@ func sparseIndexItemLess(i1, i2 sparseIndexItem) bool {
 }
 
 // === sparseIndexItem end
-// === ssTableItem begin
 
-type ssTableItem struct {
-	key       []byte
-	value     []byte
-	isDeleted bool
-}
-
-func (item *ssTableItem) size() int {
-	return len(item.key) + len(item.value) + 1
-}
-
-func ssTableItemLess(i1, i2 ssTableItem) bool {
-	return bytes.Compare(i1.key, i2.key) < 0
-}
-
-// === ssTableItem end
 // === ssTableItemDisk begin
-
 type ssTableItemDisk struct {
 	key       []byte
 	value     []byte
@@ -112,31 +92,8 @@ type ssTableFooterInfo struct {
 	numSparseIndexBytes int64
 }
 
-type SSTableConfig struct {
-	MaxMemTableSize      int64
-	MaxSparseIndexMapGap int64
-}
-
-// SSTable is either in tree.ModeInFile or tree.ModeInMem
-//
-// TODO: SStable is supposed to the on disk file + related in mem
-// datastructures. The inmem mode here is supposed to be purely
-// handled by lsmtree's memtable.
-//
-// In tree.ModeInMem
-//   - memTable will be used for reads and writes
-//   - memTable size is tracked via memTableSize and if it goes beyond config.MaxMemTableSize then
-//     it will be converted to ModeInFile
-//
-// In ModeInFile
-//   - sparseIndex is lazily created.
-//   - SSTable is immutable i.e write operations will be disallowed
 type SSTable struct {
 	// TODO: read write locks
-
-	// ModeInMem related data structures
-	memTable     *btree.BTreeG[ssTableItem]
-	memTableSize int
 
 	// ModeInFile related data structures
 	sparseIndex *btree.BTreeG[sparseIndexItem]
@@ -152,7 +109,6 @@ type SSTable struct {
 	filter filter.Filter
 
 	// General items
-	config     SSTableConfig
 	tableMutex sync.RWMutex
 }
 
@@ -170,7 +126,7 @@ func NewFromFile(name string) (*SSTable, error) {
 		readers:  createEmptyReaders(16),
 	}
 	var err error
-	ret.filter, err = loadROFilterFromFile(ret.cuckooFileName())
+	ret.filter, err = loadROFilterFromFile(filterFileName(name))
 	if err != nil {
 		return nil, err
 	} else {
@@ -179,52 +135,16 @@ func NewFromFile(name string) (*SSTable, error) {
 
 }
 
-func EmptyWithDefaultConfig(fileName string) SSTable {
-	defaultConf := SSTableConfig{MaxMemTableSize: DefaultMaxMemTableSize, MaxSparseIndexMapGap: DefaultSparseIndexMaxGap}
-	return Empty(fileName, defaultConf)
-}
-
-func Empty(fileName string, config SSTableConfig) SSTable {
-	return SSTable{
-		memTable: btree.NewG(2, ssTableItemLess),
-		fileName: fileName,
-		config:   config,
-		readers:  createEmptyReaders(16),
-	}
-}
-
 func (table *SSTable) Mode() KVStoreMode {
-	if table.memTable != nil {
-		return ModeInMem
-	} else {
-		return ModeInFile
-	}
+	return ModeInFile
 }
 
-func (table *SSTable) putInternal(item ssTableItem) DbError {
-	if table.Mode() != ModeInMem {
-		return NewError("RO SSTtable", ROTable)
-	}
-	table.tableMutex.Lock()
-	defer table.tableMutex.Unlock()
-	old, oldExists := table.memTable.ReplaceOrInsert(item)
-	if !oldExists {
-		table.memTableSize += item.size()
-	} else {
-		table.memTableSize += item.size() - old.size()
-	}
-	if int64(table.memTableSize) > table.config.MaxMemTableSize {
-		return table.ConvertToSegmentFile()
-	}
-	return NoError
+func (table *SSTable) Put(_, _ string) DbError {
+	return NewError("RO SSTtable", ROTable)
 }
 
-func (table *SSTable) Put(key, value string) DbError {
-	return table.putInternal(ssTableItem{key: []byte(key), value: []byte(value)})
-}
-
-func (table *SSTable) Delete(key string) DbError {
-	return table.putInternal(ssTableItem{key: []byte(key), isDeleted: true})
+func (table *SSTable) Delete(_ string) DbError {
+	return NewError("RO SSTtable", ROTable)
 }
 
 // setupFooter is expected by to called by ensureSparseIndex when
@@ -303,12 +223,12 @@ func (table *SSTable) getFileHandle() (ret *bufReaderWithSeek, dberr DbError) {
 	return table.readers[readerId], NoError
 }
 
-func (table *SSTable) getFromDisk(key string) (value string, dberr DbError) {
+func (table *SSTable) Get(key string) (value string, dberr DbError) {
 	keyBytes := []byte(key)
 	if table.filter != nil {
 		test := table.filter.Lookup(keyBytes)
 		if !test {
-			return "", NewError(sstableErrNotExistsCuckoo, KeyNotExists)
+			return "", NewError(sstableErrNotExistsFilter, KeyNotExists)
 		}
 	}
 
@@ -360,45 +280,31 @@ func (table *SSTable) getFromDisk(key string) (value string, dberr DbError) {
 	return "", NewError(sstableErrNotExistsEndOfDataSection, KeyNotExists)
 }
 
-func (table *SSTable) Get(key string) (value string, dberr DbError) {
-	if table.Mode() != ModeInMem {
-		return table.getFromDisk(key)
-	}
-	table.tableMutex.RLock()
-	defer table.tableMutex.RUnlock()
-	existing, ok := table.memTable.Get(ssTableItem{key: []byte(key)})
-	if !ok {
-		return "", NewError(sstableErrNotExists, KeyNotExists)
-	} else if existing.isDeleted {
-		return "", NewError(sstableErrNotExistsMarkedAsDeleted, KeyMarkedAsDeleted)
-	} else {
-		return string(existing.value), NoError
-	}
-}
-func (table *SSTable) cuckooFileName() string {
-	return table.fileName + ".filter"
+func filterFileName(filename string) string {
+	return filename + ".filter"
 }
 
-func (table *SSTable) ConvertToSegmentFile() DbError {
-	// TODO: Lock the datastructure here.
-	if table.Mode() == ModeInFile {
-		return NoError
-	}
-
+func memtableToSSTable(filename string, memtable *memTable) (*SSTable, DbError) {
 	var err error
 	// Create filter filter
-	if table.filter, err = newROFilterFromMem(table.memTable); err != nil {
-		return NewInternalError(err)
-	} else if err = saveFilterToFile(table.cuckooFileName(), table.filter); err != nil {
-		return NewInternalError(err)
+	var filter filter.Filter
+	filterFileName := filterFileName(filename)
+	if filter, err = newROFilterFromMem(memtable.data); err != nil {
+		return nil, NewInternalError(err)
+	} else if err = saveFilterToFile(filterFileName, filter); err != nil {
+		return nil, NewInternalError(err)
 	}
+
 	// Actual ss table
-	fRaw, err := os.Create(table.fileName)
+	fRaw, err := os.Create(filename)
 	if err != nil {
-		return NewInternalError(err)
+		return nil, NewInternalError(err)
 	}
 	f := bufio.NewWriter(fRaw)
 	defer func() {
+		if fRaw == nil {
+			return
+		}
 		err2 := fRaw.Close()
 		if err == nil {
 			err = err2
@@ -412,8 +318,8 @@ func (table *SSTable) ConvertToSegmentFile() DbError {
 	// Write the data section and fill in-memory sparse index
 	numDataBytes := int64(0)
 	lastSparseIndexUpdateOffset := int64(-1)
-	table.sparseIndex = btree.NewG(2, sparseIndexItemLess)
-	memTableHandle := func(item ssTableItem) bool {
+	sparseIndex := btree.NewG(2, sparseIndexItemLess)
+	memTableHandle := func(item memTableItem) bool {
 		binary.BigEndian.PutUint32(b4, uint32(len(item.key)))
 		// XXX: Handle err here correctly
 		n1, err = f.Write(b4)
@@ -428,13 +334,13 @@ func (table *SSTable) ConvertToSegmentFile() DbError {
 		oldNumDataBytes := numDataBytes
 		numDataBytes += int64(n1 + n2 + n3 + n4)
 		if lastSparseIndexUpdateOffset < 0 ||
-			numDataBytes >= table.config.MaxSparseIndexMapGap+lastSparseIndexUpdateOffset {
-			table.sparseIndex.ReplaceOrInsert(sparseIndexItem{key: string(item.key), offset: oldNumDataBytes})
+			numDataBytes >= memtable.config.MaxSparseIndexMapGap+lastSparseIndexUpdateOffset {
+			sparseIndex.ReplaceOrInsert(sparseIndexItem{key: string(item.key), offset: oldNumDataBytes})
 			lastSparseIndexUpdateOffset = oldNumDataBytes
 		}
 		return true
 	}
-	table.memTable.Ascend(memTableHandle)
+	memtable.data.Ascend(memTableHandle)
 	// Persist the sparse index on disk
 	numSparseIndexBytes := int64(0)
 	sparseIndexHandle := func(item sparseIndexItem) bool {
@@ -451,28 +357,33 @@ func (table *SSTable) ConvertToSegmentFile() DbError {
 		numSparseIndexBytes += int64(n1 + n2 + n3)
 		return true
 	}
-	table.sparseIndex.Ascend(sparseIndexHandle)
+	sparseIndex.Ascend(sparseIndexHandle)
 	// Footer
 	binary.BigEndian.PutUint64(b8, uint64(numDataBytes))
 	if n1, err = f.Write(b8); err != nil {
-		return NewInternalError(err)
+		return nil, NewInternalError(err)
 	}
 	binary.BigEndian.PutUint64(b8, uint64(numSparseIndexBytes))
 	if n2, err = f.Write(b8); err != nil {
-		return NewInternalError(err)
+		return nil, NewInternalError(err)
 	}
-	table.memTable = nil
 	if err = fRaw.Close(); err != nil {
 		fRaw = nil
-		return NewInternalError(err)
+		return nil, NewInternalError(err)
 	}
-	table.footer = &ssTableFooterInfo{
+	footer := &ssTableFooterInfo{
 		numDataBytes:        numDataBytes,
 		numSparseIndexBytes: numSparseIndexBytes,
 	}
-	f = nil
-	// f.close done by defer
-	return NoError
+	ret := &SSTable{
+		sparseIndex: sparseIndex,
+		fileName:    filename,
+		footer:      footer,
+		readers:     createEmptyReaders(16),
+		filter:      filter,
+		tableMutex:  sync.RWMutex{},
+	}
+	return ret, NoError
 }
 
 func (table *SSTable) nextSparseIndexItemFromFile(

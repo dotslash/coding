@@ -66,7 +66,7 @@ func TemplateTestLarge(
 		if i > sstableSize && i%sstableSize == 0 {
 			t.Logf("Put %v entries in %v", i, time.Now().Sub(start))
 			flushStart := time.Now()
-			err := table.getInMem().ConvertToSegmentFile()
+			err := table.flushToDisk()
 			assert.Equal(t, err.Success(), true, err.Error())
 			t.Logf("ConvertToSegmentFile done in %v", time.Now().Sub(flushStart))
 		}

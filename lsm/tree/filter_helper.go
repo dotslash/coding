@@ -11,11 +11,11 @@ func defaultFilter() *filter.BitsAndBloomsFilter {
 	return &filter.BitsAndBloomsFilter{}
 }
 
-func newROFilterFromMem(mem *btree.BTreeG[ssTableItem]) (filter.Filter, error) {
+func newROFilterFromMem(mem *btree.BTreeG[memTableItem]) (filter.Filter, error) {
 	ret := defaultFilter()
 	ret.Init(uint(mem.Len()), 0.01)
 	var err error
-	handle := func(item ssTableItem) bool {
+	handle := func(item memTableItem) bool {
 		if !ret.Insert(item.key) {
 			err = fmt.Errorf("failed to insert %v", item.key)
 			return false
