@@ -85,23 +85,23 @@ func (table *memTable) putInternal(item memTableItem) DbError {
 	return NoError
 }
 
-func (table *memTable) Put(key, value string) DbError {
-	return table.putInternal(memTableItem{key: []byte(key), value: []byte(value)})
+func (table *memTable) Put(key, value []byte) DbError {
+	return table.putInternal(memTableItem{key: key, value: value})
 }
 
-func (table *memTable) Delete(key string) DbError {
-	return table.putInternal(memTableItem{key: []byte(key), isDeleted: true})
+func (table *memTable) Delete(key []byte) DbError {
+	return table.putInternal(memTableItem{key: key, isDeleted: true})
 }
 
-func (table *memTable) Get(key string) (value string, dberr DbError) {
+func (table *memTable) Get(key []byte) (value []byte, dberr DbError) {
 	table.tableMutex.RLock()
 	defer table.tableMutex.RUnlock()
-	existing, ok := table.data.Get(memTableItem{key: []byte(key)})
+	existing, ok := table.data.Get(memTableItem{key: key})
 	if !ok {
-		return "", NewError(memTableErrNotExists, KeyNotExists)
+		return nil, NewError(memTableErrNotExists, KeyNotExists)
 	} else if existing.isDeleted {
-		return "", NewError(memTableErrNotExistsMarkedAsDeleted, KeyMarkedAsDeleted)
+		return nil, NewError(memTableErrNotExistsMarkedAsDeleted, KeyMarkedAsDeleted)
 	} else {
-		return string(existing.value), NoError
+		return existing.value, NoError
 	}
 }

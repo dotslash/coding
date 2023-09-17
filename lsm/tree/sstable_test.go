@@ -18,21 +18,21 @@ func TestInMemSStable(t *testing.T) {
 	checkNotExists(t, "key1", inMem)
 
 	// add key1 -> value1
-	err := inMem.Put("key1", "value1")
+	err := inMem.Put([]byte("key1"), []byte("value1"))
 	assert.Equal(t, err.Success(), true)
 
 	// Check key1 -> value1
 	checkExists(t, "key1", "value1", inMem)
 
 	// Delete key1
-	err = inMem.Delete("key1")
+	err = inMem.Delete([]byte("key1"))
 	assert.Equal(t, err.Success(), true)
 
 	// key1 should not exist
 	checkNotExists(t, "key1", inMem)
 
 	// Put key1 -> value2
-	err = inMem.Put("key1", "value2")
+	err = inMem.Put([]byte("key1"), []byte("value2"))
 	assert.Equal(t, err.Success(), true)
 
 	// Verify key1 -> value2
@@ -56,7 +56,7 @@ func TemplateTestLargeSStable(
 	ops, inmem, keys := generateOps(1000*1000, 0.1)
 	for i := 0; i < len(ops); i++ {
 		op := ops[i]
-		err := memTable.Put(op.key, op.value)
+		err := memTable.Put([]byte(op.key), []byte(op.value))
 		assert.Equal(t, err.Success(), true)
 		if i%100000 == 1 {
 			t.Logf("Put %v entries in %v", i, time.Now().Sub(start))

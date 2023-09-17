@@ -65,7 +65,7 @@ func NewInternalError(err error) DbError {
 
 type KVStore interface {
 	Mode() KVStoreMode
-	Put(key, value string) DbError
-	Delete(key string) DbError
-	Get(key string) (value string, err DbError)
+	Put(key, value []byte) DbError
+	Delete(key []byte) DbError
+	Get(key []byte) (value []byte, err DbError)
 }

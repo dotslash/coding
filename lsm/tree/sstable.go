@@ -139,11 +139,11 @@ func (table *SSTable) Mode() KVStoreMode {
 	return ModeInFile
 }
 
-func (table *SSTable) Put(_, _ string) DbError {
+func (table *SSTable) Put(_, _ []byte) DbError {
 	return NewError("RO SSTtable", ROTable)
 }
 
-func (table *SSTable) Delete(_ string) DbError {
+func (table *SSTable) Delete(_ []byte) DbError {
 	return NewError("RO SSTtable", ROTable)
 }
 
@@ -220,12 +220,12 @@ func (table *SSTable) getFileHandleAndLock() (ret *bufReaderWithSeek, dberr DbEr
 	return table.readers[readerId], NoError
 }
 
-func (table *SSTable) Get(key string) (value string, dberr DbError) {
+func (table *SSTable) Get(key []byte) (value []byte, dberr DbError) {
 	keyBytes := []byte(key)
 	if table.filter != nil {
 		test := table.filter.Lookup(keyBytes)
 		if !test {
-			return "", NewError(sstableErrNotExistsFilter, KeyNotExists)
+			return nil, NewError(sstableErrNotExistsFilter, KeyNotExists)
 		}
 	}
 
@@ -235,20 +235,20 @@ func (table *SSTable) Get(key string) (value string, dberr DbError) {
 		return false // We dont need to iterate. We want offset of the largest entry <= key
 	}
 	if err := table.ensureSparseIndex(); err.GetError() != nil {
-		return "", err
+		return nil, err
 	}
 	table.sparseIndex.DescendLessOrEqual(sparseIndexItem{key: keyBytes}, handle)
 	if offset < 0 {
 		// key is smaller than the smallest entry of the table.
-		return "", NewError(sstableErrNotExists, KeyNotExists)
+		return nil, NewError(sstableErrNotExists, KeyNotExists)
 	}
 	f, err := table.getFileHandleAndLock()
 	defer f.lock.Unlock()
 	if err.GetError() != nil {
-		return "", err
+		return nil, err
 	}
 	if _, ferr := f.Seek(offset, io.SeekStart); ferr != nil {
-		return "", NewInternalError(ferr)
+		return nil, NewInternalError(ferr)
 	}
 	item := ssTableItemDisk{
 		key:       make([]byte, 128), // XXX: Should this be a config?
@@ -259,22 +259,22 @@ func (table *SSTable) Get(key string) (value string, dberr DbError) {
 	}
 	for offset < table.footer.numDataBytes {
 		if nBytesRead, err := table.nextSStableItemFromFile(f, keyBytes, &item); err.GetError() != nil {
-			return "", err
+			return nil, err
 		} else if cmp := bytes.Compare(item.getKeySlice(), keyBytes); cmp == 0 {
 			// match
 			if item.isDeleted {
-				return "", NewError(sstableErrNotExistsMarkedAsDeleted, KeyMarkedAsDeleted)
+				return nil, NewError(sstableErrNotExistsMarkedAsDeleted, KeyMarkedAsDeleted)
 			} else {
-				return string(item.getValueSlice()), NoError
+				return item.getValueSlice(), NoError
 			}
 		} else if cmp > 0 {
 			// We are past the current key
-			return "", NewError(sstableErrNotExistsPastCurrentKey, KeyNotExists)
+			return nil, NewError(sstableErrNotExistsPastCurrentKey, KeyNotExists)
 		} else {
 			offset += int64(nBytesRead)
 		}
 	}
-	return "", NewError(sstableErrNotExistsEndOfDataSection, KeyNotExists)
+	return nil, NewError(sstableErrNotExistsEndOfDataSection, KeyNotExists)
 }
 
 func filterFileName(filename string) string {

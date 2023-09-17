@@ -48,7 +48,7 @@ func (table *LSMTree) getInMem() (*memTable, DbError) {
 	return table.memTable, NoError
 }
 
-func (table *LSMTree) Put(key, value string) DbError {
+func (table *LSMTree) Put(key, value []byte) DbError {
 	if table, err := table.getInMem(); err.error != nil {
 		return err
 	} else {
@@ -57,7 +57,7 @@ func (table *LSMTree) Put(key, value string) DbError {
 
 }
 
-func (table *LSMTree) Delete(key string) DbError {
+func (table *LSMTree) Delete(key []byte) DbError {
 	if table, err := table.getInMem(); err.error != nil {
 		return err
 	} else {
@@ -65,9 +65,9 @@ func (table *LSMTree) Delete(key string) DbError {
 	}
 }
 
-func (table *LSMTree) Get(key string) (value string, err DbError) {
+func (table *LSMTree) Get(key []byte) (value []byte, err DbError) {
 	if currentTable, err := table.getInMem(); err.error != nil {
-		return "", err
+		return nil, err
 	} else if value, err = currentTable.Get(key); err.Success() || err.ErrorType == KeyMarkedAsDeleted {
 		return value, err
 	}
@@ -78,5 +78,5 @@ func (table *LSMTree) Get(key string) (value string, err DbError) {
 			return value, err
 		}
 	}
-	return "", NewError("Not exists", KeyNotExists)
+	return nil, NewError("Not exists", KeyNotExists)
 }

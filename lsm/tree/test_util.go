@@ -1,6 +1,7 @@
 package tree
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"github.com/stretchr/testify/assert"
@@ -11,13 +12,13 @@ import (
 )
 
 func checkExists(t *testing.T, key, value string, kv KVStore) {
-	actualValue, err := kv.Get(key)
+	actualValue, err := kv.Get([]byte(key))
 	assert.NoError(t, err.GetError(), "for %s->%s", key, value)
-	assert.Equal(t, value, actualValue, "for %s->%s", key, value)
+	assert.Equal(t, 0, bytes.Compare([]byte(value), actualValue), "for %s->%s", key, value)
 }
 
 func checkNotExists(t *testing.T, key string, kv KVStore) {
-	_, err := kv.Get(key)
+	_, err := kv.Get([]byte(key))
 	assert.Equal(t,
 		true,
 		err.ErrorType == KeyNotExists || err.ErrorType == KeyMarkedAsDeleted,
