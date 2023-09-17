@@ -75,15 +75,19 @@ func readNonExistingEntries(
 	sem := semaphore.NewWeighted(int64(readConcurrency))
 	numReads := 0
 	readStart := time.Now()
-	for ; numReads < maxOps && time.Now().Sub(readStart) < maxTimeForReads; numReads++ {
+	batchSize := 1000
+	for ; numReads < maxOps && time.Now().Sub(readStart) < maxTimeForReads; numReads += batchSize {
 		assert.Equal(t, sem.Acquire(context.TODO(), 1), nil)
-		go func(numReadsArg int) {
+		go func(startIndex int) {
 			defer sem.Release(1)
-			keyToTest := keys[rand.Intn(len(keys))] + "zzz_not_exists"
-			// Actual test
-			checkNotExists(t, keyToTest, store)
-			if numReadsArg%100000 == 1 {
-				t.Logf("readNonExistingEntries %v entries in %v", numReadsArg, time.Now().Sub(readStart))
+			for i := 0; i < batchSize; i++ {
+				keyToTest := keys[rand.Intn(len(keys))] + "zzz_not_exists"
+				// Actual test
+				checkNotExists(t, keyToTest, store)
+				curInd := startIndex + i
+				if curInd%100000 == 1 {
+					t.Logf("readNonExistingEntries %v entries in %v", curInd, time.Now().Sub(readStart))
+				}
 			}
 		}(numReads)
 	}
@@ -103,17 +107,21 @@ func readExistingEntries(
 	)
 	sem := semaphore.NewWeighted(int64(readConcurrency))
 	numReads := 0
+
+	batchSize := 1000
 	readStart := time.Now()
-	for ; numReads < maxOps && time.Now().Sub(readStart) < maxTimeForReads; numReads++ {
+	for ; numReads < maxOps && time.Now().Sub(readStart) < maxTimeForReads; numReads += batchSize {
 		assert.Equal(t, sem.Acquire(context.TODO(), 1), nil)
-		go func(numReadsArg int) {
+		go func(_startIndex int) {
 			defer sem.Release(1)
-			keyToTest := keys[rand.Intn(len(keys))]
-			expectedValue := inmem[keyToTest]
-			// Actual test
-			checkExists(t, keyToTest, expectedValue, store)
-			if numReadsArg%100000 == 1 {
-				t.Logf("readExistingEntries %v entries in %v", numReadsArg, time.Now().Sub(readStart))
+			for curInd := _startIndex; curInd < _startIndex+batchSize; curInd++ {
+				keyToTest := keys[rand.Intn(len(keys))]
+				expectedValue := inmem[keyToTest]
+				// Actual test
+				checkExists(t, keyToTest, expectedValue, store)
+				if curInd%100000 == 1 {
+					t.Logf("readExistingEntries %v entries in %v", curInd, time.Now().Sub(readStart))
+				}
 			}
 		}(numReads)
 	}
