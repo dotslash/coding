@@ -54,7 +54,8 @@ func TemplateTestLargeSStable(
 	memTable := NewMemTable(config)
 	start := time.Now()
 
-	ops, inmem, keys := generateOps(1000000, 0.1)
+	ops, inmem, keys := generateOps(1000000, 0)
+	t.Logf("NumOps: %v, num keys: %v", len(ops), len(keys))
 	for i := 0; i < len(ops); i++ {
 		op := ops[i]
 		err := memTable.Put([]byte(op.key), []byte(op.value))
@@ -68,10 +69,13 @@ func TemplateTestLargeSStable(
 	flushStart := time.Now()
 	sstable, err := memtableToSSTable(fName, memTable)
 	assert.Equal(t, err.Success(), true)
-	sstable, rawerr := NewSsTableFromFile(fName)
-	require.Nil(t, rawerr)
+	decoded, rawErr := NewSsTableFromFile(fName)
+	require.Nil(t, rawErr)
 	flushDuration := time.Now().Sub(flushStart)
 	t.Logf("ConvertToSegmentFile done in %v", flushDuration)
+
+	readExistingEntries(t, 4, maxTimeForReads, 20000, keys, inmem, decoded)
+	readNonExistingEntries(t, 4, maxTimeForReads, 20000, keys, decoded)
 
 	readDuration, numReads := readExistingEntries(t, readConcurrency, maxTimeForReads, 1000*1000, keys, inmem, sstable)
 	nonReadDuration, numNonReads := readNonExistingEntries(t, readConcurrency, maxTimeForReads, 1000*1000, keys, sstable)

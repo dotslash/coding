@@ -60,8 +60,8 @@ func generateOps(numOps int, overrideProbability float32) (ops []putOp, finalKV 
 		if i > 0 && rand.Float32() < overrideProbability {
 			keyIndex = rand.Intn(i)
 		}
-		key := fmt.Sprintf("value%v", keyIndex)
-		value := fmt.Sprintf("value%v", i)
+		key := fmt.Sprintf("Key_%v", keyIndex)
+		value := fmt.Sprintf("Value_%v", i)
 		ops = append(ops, putOp{key, value})
 		finalKV[key] = value
 	}

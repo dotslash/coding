@@ -25,12 +25,24 @@ const (
 
 // === bufReaderWithSeek start
 
+// bufReaderWithSeek is a custom implementation of ReadWriteSeeker with the following functionality
+//   - Read(p []byte) will read into p fully until it hits error (including eof)
+//   - It buffers data via bufio.Reader. Generally seek would not work nicely with buffering. So we override the
+//     seek method and discard all buffer data whenever Seek is invoked
+//   - It is not thread safe, like most other io utils. The user is expected to hold locks sensibly. For
+//     convenience the struct also contains the lock. But locking is not enforced by bufReaderWithSeek
 type bufReaderWithSeek struct {
 	*bufio.Reader
 	raw io.ReadWriteSeeker
-	// The reader is not thread safe by itself. User of this util must a hold
-	// this lock and operate on the reader.
+	// The reader is not thread safe by itself. User of this util must a hold this lock appropriately.
 	lock sync.Locker
+}
+
+// Generally, the semantic of Read is that, it will read at most len(p) bytes. It is the responsibility
+// of the user to read more bytes if the input array does not have enough bytes. We can either fix all
+// usages to ReadFull or conveniently override the Read method to the "right thing" - Choose the latter
+func (s *bufReaderWithSeek) Read(p []byte) (n int, err error) {
+	return io.ReadFull(s.Reader, p)
 }
 
 func (s *bufReaderWithSeek) Seek(offset int64, whence int) (newOffset int64, err error) {
@@ -221,7 +233,6 @@ func (table *SSTable) ensureSparseIndex() DbError {
 		if err.GetError() != nil {
 			return err
 		}
-		fmt.Println(string(item.key), item.offset, nBytesRead, len(item.key))
 		curIndex += int64(nBytesRead)
 		sparseIndex.ReplaceOrInsert(item)
 	}
@@ -462,6 +473,9 @@ func (table *SSTable) nextSparseIndexItemFromFile(
 
 	if bytesReadCur, err = f.Read(b8); err != nil {
 		return sparseIndexItem{}, bytesReadCur + bytesRead, NewInternalError(err)
+	}
+	if bytesReadCur != 8 {
+		fmt.Println("wowow wowo")
 	}
 	bytesRead += bytesReadCur
 	item.offset = int64(binary.BigEndian.Uint64(b8))
