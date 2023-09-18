@@ -18,28 +18,38 @@ func main() {
 	//    /main load <path>
 	mode := os.Args[1]
 	filePath := os.Args[2]
-	var table *tree.SSTable
+	var table tree.KVStore
 	if mode == "new" {
 		filePath = filePath + uuid.NewString() + ".dump"
 		fmt.Println("Will flush the sstable to", filePath)
-		_table := tree.EmptyWithDefaultConfig(filePath)
-		table = &_table
+		lsmTable := tree.Empty(filePath)
+		table = lsmTable
 		defer func() {
 			fmt.Println("Flushing to disk at", filePath)
-			err := table.ConvertToSegmentFile()
+			err := lsmTable.FlushToDisk()
 			if err.GetError() != nil {
-				fmt.Println("Failed in ConvertToSegmentFile", err.Error())
+				fmt.Println("Failed in FlushToDisk", err.Error())
 			} else {
 				fmt.Println("Flushed to disk at", filePath)
 			}
 		}()
-	} else {
+	} else if mode == "load_lsm" {
+		var err tree.DbError
+		table, err = tree.LoadLsmTree(filePath)
+		if !err.Success() {
+			panic(err)
+		}
+	} else if mode == "load_sst" {
 		var err error
-		table, err = tree.NewFromFile(filePath)
+		table, err = tree.NewSsTableFromFile(filePath)
 		if err != nil {
 			panic(err)
 		}
+	} else {
+		fmt.Println("Invalid mode", mode)
+		os.Exit(1)
 	}
+
 	for {
 		fmt.Print("Input: ")
 		line, _ := reader.ReadString('\n')
@@ -47,26 +57,32 @@ func main() {
 		if line == "exit" {
 			break
 		} else if parts := strings.Split(line, " "); parts[0] == "get" && len(parts) == 2 {
-			value, err := table.Get(parts[1])
+			valueBytes, err := table.Get([]byte(parts[1]))
 			if !err.Success() {
-				fmt.Println("value =", value)
+				fmt.Println("Error =", err.Error())
 			} else {
-				fmt.Println("Does not exist: err =", value)
+				value := string(valueBytes)
+				fmt.Println("Value", value)
 			}
 		} else if parts[0] == "put" && len(parts) == 3 {
-			err := table.Put(parts[1], parts[2])
+			err := table.Put([]byte(parts[1]), []byte(parts[2]))
 			if !err.Success() {
 				fmt.Println("Put failed", err.Error())
 			}
 		} else if parts[0] == "delete" && len(parts) == 2 {
-			err := table.Delete(parts[1])
+			err := table.Delete([]byte(parts[1]))
 			if !err.Success() {
 				fmt.Println("Delete failed", err.Error())
 			}
 		} else if parts[0] == "flush" && len(parts) == 1 {
-			err := table.ConvertToSegmentFile()
-			if !err.Success() {
-				fmt.Println("ConvertToSegmentFile failed", err.Error())
+			if lsm, ok := table.(*tree.LSMTree); ok {
+				var err tree.DbError
+				err = lsm.FlushToDisk()
+				if !err.Success() {
+					fmt.Println("flush failed", err.Error())
+				}
+			} else {
+				fmt.Println("flush supported only on lsm")
 			}
 		}
 	}

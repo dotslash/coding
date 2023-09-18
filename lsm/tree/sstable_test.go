@@ -4,13 +4,14 @@ import (
 	"fmt"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"testing"
 	"time"
 )
 
 func TestInMemSStable(t *testing.T) {
 	fuuid, _ := uuid.NewRandom()
-	fName := fmt.Sprintf("/tmp/sstable_test_%s.dump", fuuid.String())
+	fName := fmt.Sprintf("/tmp/sstable_test_%s.sst", fuuid.String())
 	t.Logf("ss table output: %s", fName)
 	inMem := NewMemTable(defaultMemTableConfig)
 
@@ -48,12 +49,12 @@ func TemplateTestLargeSStable(
 	maxTimeForReads time.Duration, readConcurrency int,
 ) TemplateTestLargeRes {
 	fuuid, _ := uuid.NewRandom()
-	fName := fmt.Sprintf("/tmp/sstable_test_%s.dump", fuuid.String())
+	fName := fmt.Sprintf("/tmp/sstable_test_%s.sst", fuuid.String())
 	t.Logf("ss table output: %s", fName)
 	memTable := NewMemTable(config)
 	start := time.Now()
 
-	ops, inmem, keys := generateOps(1000*1000, 0.1)
+	ops, inmem, keys := generateOps(1000000, 0.1)
 	for i := 0; i < len(ops); i++ {
 		op := ops[i]
 		err := memTable.Put([]byte(op.key), []byte(op.value))
@@ -67,6 +68,8 @@ func TemplateTestLargeSStable(
 	flushStart := time.Now()
 	sstable, err := memtableToSSTable(fName, memTable)
 	assert.Equal(t, err.Success(), true)
+	sstable, rawerr := NewSsTableFromFile(fName)
+	require.Nil(t, rawerr)
 	flushDuration := time.Now().Sub(flushStart)
 	t.Logf("ConvertToSegmentFile done in %v", flushDuration)
 

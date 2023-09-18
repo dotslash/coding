@@ -11,7 +11,7 @@ import (
 
 func TestInMem(t *testing.T) {
 	fuuid, _ := uuid.NewRandom()
-	fName := fmt.Sprintf("/tmp/lsmtree_test_%s.dump", fuuid.String())
+	fName := fmt.Sprintf("/tmp/lsmtree_test_%s", fuuid.String())
 	assert.NoError(t, os.Mkdir(fName, 0755))
 
 	t.Logf("ss table output: %s", fName)
@@ -48,7 +48,7 @@ func TemplateTestLarge(
 	maxTimeForReads time.Duration, readConcurrency int,
 ) TemplateTestLargeRes {
 	fuuid, _ := uuid.NewRandom()
-	fName := fmt.Sprintf("/tmp/lsmtree_test_%s.dump", fuuid.String())
+	fName := fmt.Sprintf("/tmp/lsmtree_test_%s", fuuid.String())
 	assert.NoError(t, os.Mkdir(fName, 0755))
 	t.Logf("ss table output: %s", fName)
 
@@ -66,7 +66,7 @@ func TemplateTestLarge(
 		if i > sstableSize && i%sstableSize == 0 {
 			t.Logf("Put %v entries in %v", i, time.Now().Sub(start))
 			flushStart := time.Now()
-			err := table.flushToDisk()
+			err := table.FlushToDisk()
 			assert.Equal(t, err.Success(), true, err.Error())
 			t.Logf("ConvertToSegmentFile done in %v", time.Now().Sub(flushStart))
 		}

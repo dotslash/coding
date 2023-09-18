@@ -2,9 +2,43 @@ package tree
 
 import (
 	"fmt"
+	"os"
 	"sync"
 	"time"
 )
+
+func Empty(dataLocation string) *LSMTree {
+	return &LSMTree{
+		memTable:     nil,
+		ssTables:     make([]*SSTable, 0),
+		dataLocation: dataLocation,
+	}
+}
+
+func LoadLsmTree(dataLocation string) (*LSMTree, DbError) {
+	var err error
+	entries, err := os.ReadDir(dataLocation)
+	if err != nil {
+		return nil, NewRawError(err, UncategorizedError)
+	}
+	ret := &LSMTree{
+		memTable:     nil,
+		ssTables:     make([]*SSTable, 0),
+		dataLocation: dataLocation,
+	}
+	for _, e := range entries {
+		if !isSStFile(e.Name()) {
+			continue
+		}
+		fullPath := dataLocation + "/" + e.Name()
+		sst, err := NewSsTableFromFile(fullPath)
+		if err != nil {
+			return nil, NewRawError(err, UncategorizedError)
+		}
+		ret.ssTables = append(ret.ssTables, sst)
+	}
+	return ret, NoError
+}
 
 type LSMTree struct {
 	memTable *memTable
@@ -18,15 +52,22 @@ func (table *LSMTree) Mode() KVStoreMode {
 	return ModeHybrid
 }
 
-func (table *LSMTree) flushToDisk() DbError {
+func (table *LSMTree) FlushToDisk() DbError {
+	table.tableMutex.Lock()
+	defer table.tableMutex.Unlock()
+	return table.flushToDiskAssumeLock()
+}
+
+func (table *LSMTree) flushToDiskAssumeLock() DbError {
 	if table.memTable == nil {
 		return NoError
 	}
-	flushLocation := fmt.Sprintf("%v/sstable_%v", table.dataLocation, time.Now().UnixMicro())
+	flushLocation := fmt.Sprintf("%v/%v.sst", table.dataLocation, time.Now().UnixMicro())
 	flushed, err := memtableToSSTable(flushLocation, table.memTable)
 	if err.error != nil {
 		return err
 	}
+	table.memTable = nil
 	table.ssTables = append(table.ssTables, flushed)
 	return NoError
 }
@@ -41,7 +82,7 @@ func (table *LSMTree) getInMem() (*memTable, DbError) {
 	if table.memTable != nil && !table.memTable.isFull() {
 		return table.memTable, NoError
 	}
-	if err := table.flushToDisk(); err.error != nil {
+	if err := table.flushToDiskAssumeLock(); err.error != nil {
 		return nil, NoError
 	}
 	table.memTable = NewMemTable(defaultMemTableConfig)

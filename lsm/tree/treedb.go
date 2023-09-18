@@ -13,6 +13,8 @@ const (
 	ROTable            DbErrorType = "ROTable"
 	Success            DbErrorType = "Success"
 	InternalError      DbErrorType = "InternalError"
+	UserError          DbErrorType = "UserError"
+	UncategorizedError DbErrorType = "UncategorizedError"
 )
 
 type KVStoreMode string

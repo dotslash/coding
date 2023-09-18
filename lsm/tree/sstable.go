@@ -4,10 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"github.com/google/btree"
 	"io"
 	"math/rand"
 	"os"
+	"strings"
 	"sync"
 	"yesteapea.com/lsm/filter"
 )
@@ -46,12 +49,12 @@ func (s *bufReaderWithSeek) Seek(offset int64, whence int) (newOffset int64, err
 
 // === sparseIndexItem begin
 type sparseIndexItem struct {
-	key    []byte
+	key    string
 	offset int64
 }
 
 func sparseIndexItemLess(i1, i2 sparseIndexItem) bool {
-	return bytes.Compare(i1.key, i2.key) < 0
+	return i1.key < i2.key
 }
 
 // === sparseIndexItem end
@@ -120,15 +123,34 @@ func createEmptyReaders(cnt int) []*bufReaderWithSeek {
 	return ret
 }
 
-func NewFromFile(name string) (*SSTable, error) {
+func isSStFile(name string) bool {
+	return strings.HasSuffix(name, ".sst")
+}
+
+func filterFileName(filename string) string {
+	if !isSStFile(filename) {
+		err := fmt.Errorf("got invalid sst file for filterFilename:%v", filename)
+		panic(err)
+	}
+	prefix := filename[:len(filename)-4] // Remove .sst
+	return prefix + ".filter"
+}
+
+func NewSsTableFromFile(name string) (*SSTable, error) {
+	if !isSStFile(name) {
+		return nil, errors.New("wrong suffix for sst file")
+	}
 	ret := SSTable{
 		fileName: name,
 		readers:  createEmptyReaders(16),
 	}
 	var err error
+	var dbErr DbError
 	ret.filter, err = loadROFilterFromFile(filterFileName(name))
 	if err != nil {
 		return nil, err
+	} else if dbErr = ret.ensureSparseIndex(); dbErr.error != nil {
+		return nil, dbErr.error
 	} else {
 		return &ret, nil
 	}
@@ -199,6 +221,7 @@ func (table *SSTable) ensureSparseIndex() DbError {
 		if err.GetError() != nil {
 			return err
 		}
+		fmt.Println(string(item.key), item.offset, nBytesRead, len(item.key))
 		curIndex += int64(nBytesRead)
 		sparseIndex.ReplaceOrInsert(item)
 	}
@@ -221,12 +244,9 @@ func (table *SSTable) getFileHandleAndLock() (ret *bufReaderWithSeek, dberr DbEr
 }
 
 func (table *SSTable) Get(key []byte) (value []byte, dberr DbError) {
-	keyBytes := []byte(key)
-	if table.filter != nil {
-		test := table.filter.Lookup(keyBytes)
-		if !test {
-			return nil, NewError(sstableErrNotExistsFilter, KeyNotExists)
-		}
+	test := table.filter.Lookup(key)
+	if !test {
+		return nil, NewError(sstableErrNotExistsFilter, KeyNotExists)
 	}
 
 	offset := int64(-1)
@@ -237,7 +257,7 @@ func (table *SSTable) Get(key []byte) (value []byte, dberr DbError) {
 	if err := table.ensureSparseIndex(); err.GetError() != nil {
 		return nil, err
 	}
-	table.sparseIndex.DescendLessOrEqual(sparseIndexItem{key: keyBytes}, handle)
+	table.sparseIndex.DescendLessOrEqual(sparseIndexItem{key: string(key)}, handle)
 	if offset < 0 {
 		// key is smaller than the smallest entry of the table.
 		return nil, NewError(sstableErrNotExists, KeyNotExists)
@@ -258,9 +278,9 @@ func (table *SSTable) Get(key []byte) (value []byte, dberr DbError) {
 		isDeleted: false,
 	}
 	for offset < table.footer.numDataBytes {
-		if nBytesRead, err := table.nextSStableItemFromFile(f, keyBytes, &item); err.GetError() != nil {
+		if nBytesRead, err := table.nextSStableItemFromFile(f, key, &item); err.GetError() != nil {
 			return nil, err
-		} else if cmp := bytes.Compare(item.getKeySlice(), keyBytes); cmp == 0 {
+		} else if cmp := bytes.Compare(item.getKeySlice(), key); cmp == 0 {
 			// match
 			if item.isDeleted {
 				return nil, NewError(sstableErrNotExistsMarkedAsDeleted, KeyMarkedAsDeleted)
@@ -277,11 +297,30 @@ func (table *SSTable) Get(key []byte) (value []byte, dberr DbError) {
 	return nil, NewError(sstableErrNotExistsEndOfDataSection, KeyNotExists)
 }
 
-func filterFileName(filename string) string {
-	return filename + ".filter"
+func pickFirstErr(errs ...error) error {
+	for _, e := range errs {
+		if e != nil {
+			return e
+		}
+	}
+	return nil
 }
 
-func memtableToSSTable(filename string, memtable *memTable) (*SSTable, DbError) {
+func closeWriter(b *bufio.Writer, f *os.File) (err error) {
+	var err1, err2 error
+	if b != nil {
+		err1 = b.Flush()
+	}
+	if f != nil {
+		err2 = f.Close()
+	}
+	return pickFirstErr(err1, err2)
+}
+
+func memtableToSSTable(filename string, memtable *memTable) (sst *SSTable, retErr DbError) {
+	if !isSStFile(filename) {
+		return nil, NewError("wrong suffix for sst file", UserError)
+	}
 	var err error
 	// Create filter filter
 	var filter filter.Filter
@@ -299,12 +338,9 @@ func memtableToSSTable(filename string, memtable *memTable) (*SSTable, DbError) 
 	}
 	f := bufio.NewWriter(fRaw)
 	defer func() {
-		if fRaw == nil {
-			return
-		}
-		err2 := fRaw.Close()
-		if err == nil {
-			err = err2
+		err := closeWriter(f, fRaw)
+		if err != nil {
+			retErr = NewInternalError(err)
 		}
 	}()
 
@@ -316,56 +352,73 @@ func memtableToSSTable(filename string, memtable *memTable) (*SSTable, DbError) 
 	numDataBytes := int64(0)
 	lastSparseIndexUpdateOffset := int64(-1)
 	sparseIndex := btree.NewG(2, sparseIndexItemLess)
+	var err1, err2, err3, err4 error
 	memTableHandle := func(item memTableItem) bool {
 		binary.BigEndian.PutUint32(b4, uint32(len(item.key)))
-		// XXX: Handle err here correctly
-		n1, err = f.Write(b4)
-		n2, err = f.Write(item.key)
+		n1, err1 = f.Write(b4)
+		n2, err2 = f.Write(item.key)
 		valLengthAndIsDeleted := uint32(len(item.value))
 		if item.isDeleted {
 			valLengthAndIsDeleted = 1 << 31
 		}
 		binary.BigEndian.PutUint32(b4, valLengthAndIsDeleted)
-		n3, err = f.Write(b4)
-		n4, err = f.Write(item.value)
+		n3, err3 = f.Write(b4)
+		n4, err4 = f.Write(item.value)
 		oldNumDataBytes := numDataBytes
 		numDataBytes += int64(n1 + n2 + n3 + n4)
 		if lastSparseIndexUpdateOffset < 0 ||
 			numDataBytes >= memtable.config.MaxSparseIndexMapGap+lastSparseIndexUpdateOffset {
-			sparseIndex.ReplaceOrInsert(sparseIndexItem{key: item.key, offset: oldNumDataBytes})
+			sparseIndex.ReplaceOrInsert(sparseIndexItem{key: string(item.key), offset: oldNumDataBytes})
 			lastSparseIndexUpdateOffset = oldNumDataBytes
+		}
+		if err = pickFirstErr(err1, err2, err3, err4); err != nil {
+			return false
 		}
 		return true
 	}
 	memtable.data.Ascend(memTableHandle)
+	if err != nil {
+		return nil, NewInternalError(err)
+	}
 	// Persist the sparse index on disk
 	numSparseIndexBytes := int64(0)
 	sparseIndexHandle := func(item sparseIndexItem) bool {
-		// XXX: Handle err here correctly
 		// Length of key
 		binary.BigEndian.PutUint32(b4, uint32(len(item.key)))
-		n1, err = f.Write(b4)
+		n1, err1 = f.Write(b4)
 		// key bytes
-		n2, err = f.Write([]byte(item.key))
+		n2, err2 = f.Write([]byte(item.key))
+		if len(item.key) > 100 {
+			fmt.Println("wtf")
+		}
 		// offset in data section
 		binary.BigEndian.PutUint64(b8, uint64(item.offset))
-		n3, err = f.Write(b8)
+		n3, err3 = f.Write(b8)
 		// Update num bytes written
 		numSparseIndexBytes += int64(n1 + n2 + n3)
+		if err = pickFirstErr(err1, err2, err3); err != nil {
+			return false
+		}
 		return true
 	}
 	sparseIndex.Ascend(sparseIndexHandle)
+	if err != nil {
+		return nil, NewInternalError(err)
+	}
 	// Footer
 	binary.BigEndian.PutUint64(b8, uint64(numDataBytes))
-	if n1, err = f.Write(b8); err != nil {
+	if _, err = f.Write(b8); err != nil {
 		return nil, NewInternalError(err)
 	}
 	binary.BigEndian.PutUint64(b8, uint64(numSparseIndexBytes))
-	if n2, err = f.Write(b8); err != nil {
+	if _, err = f.Write(b8); err != nil {
 		return nil, NewInternalError(err)
 	}
-	if err = fRaw.Close(); err != nil {
-		fRaw = nil
+	err = closeWriter(f, fRaw)
+	fRaw = nil
+	f = nil
+
+	if err != nil {
 		return nil, NewInternalError(err)
 	}
 	footer := &ssTableFooterInfo{
@@ -395,13 +448,17 @@ func (table *SSTable) nextSparseIndexItemFromFile(
 	}
 	bytesRead += bytesReadCur
 	keyLen := binary.BigEndian.Uint32(b4)
+	if keyLen > 100 {
+		x, y := f.Seek(0, io.SeekCurrent)
+		fmt.Println("what is this", x, y)
+	}
 
 	keyBytes := make([]byte, keyLen)
 	if bytesReadCur, err = f.Read(keyBytes); err != nil {
 		return sparseIndexItem{}, bytesReadCur + bytesRead, NewInternalError(err)
 	}
 	bytesRead += bytesReadCur
-	item.key = keyBytes
+	item.key = string(keyBytes)
 
 	if bytesReadCur, err = f.Read(b8); err != nil {
 		return sparseIndexItem{}, bytesReadCur + bytesRead, NewInternalError(err)

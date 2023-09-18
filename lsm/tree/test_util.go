@@ -7,18 +7,28 @@ import (
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/sync/semaphore"
 	"math/rand"
+	"reflect"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 func checkExists(t *testing.T, key, value string, kv KVStore) {
-	actualValue, err := kv.Get([]byte(key))
+	actualValue, err := kv.Get(stringToBytesUnsafe(key))
 	assert.NoError(t, err.GetError(), "for %s->%s", key, value)
-	assert.Equal(t, 0, bytes.Compare([]byte(value), actualValue), "for %s->%s", key, value)
+	assert.Equal(t, 0, bytes.Compare(stringToBytesUnsafe(value), actualValue), "for %s->%s", key, value)
 }
 
+func stringToBytesUnsafe(s string) []byte {
+	stringHeader := (*reflect.StringHeader)(unsafe.Pointer(&s))
+	return *(*[]byte)(unsafe.Pointer(&reflect.SliceHeader{
+		Data: stringHeader.Data,
+		Len:  stringHeader.Len,
+		Cap:  stringHeader.Len,
+	}))
+}
 func checkNotExists(t *testing.T, key string, kv KVStore) {
-	_, err := kv.Get([]byte(key))
+	_, err := kv.Get(stringToBytesUnsafe(key))
 	assert.Equal(t,
 		true,
 		err.ErrorType == KeyNotExists || err.ErrorType == KeyMarkedAsDeleted,
