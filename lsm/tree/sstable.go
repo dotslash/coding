@@ -61,12 +61,12 @@ func (s *bufReaderWithSeek) Seek(offset int64, whence int) (newOffset int64, err
 
 // === sparseIndexItem begin
 type sparseIndexItem struct {
-	key    string
+	key    []byte
 	offset int64
 }
 
 func sparseIndexItemLess(i1, i2 sparseIndexItem) bool {
-	return i1.key < i2.key
+	return bytes.Compare(i1.key, i2.key) < 0
 }
 
 // === sparseIndexItem end
@@ -268,7 +268,7 @@ func (table *SSTable) Get(key []byte) (value []byte, dberr DbError) {
 	if err := table.ensureSparseIndex(); err.GetError() != nil {
 		return nil, err
 	}
-	table.sparseIndex.DescendLessOrEqual(sparseIndexItem{key: string(key)}, handle)
+	table.sparseIndex.DescendLessOrEqual(sparseIndexItem{key: key}, handle)
 	if offset < 0 {
 		// key is smaller than the smallest entry of the table.
 		return nil, NewError(sstableErrNotExists, KeyNotExists)
@@ -289,9 +289,9 @@ func (table *SSTable) Get(key []byte) (value []byte, dberr DbError) {
 		isDeleted: false,
 	}
 	for offset < table.footer.numDataBytes {
-		if nBytesRead, err := table.nextSStableItemFromFile(f, key, &item); err.GetError() != nil {
+		if cmp, nBytesRead, err := table.nextSStableItemFromFile(f, key, &item); err.GetError() != nil {
 			return nil, err
-		} else if cmp := bytes.Compare(item.getKeySlice(), key); cmp == 0 {
+		} else if cmp == 0 {
 			// match
 			if item.isDeleted {
 				return nil, NewError(sstableErrNotExistsMarkedAsDeleted, KeyMarkedAsDeleted)
@@ -379,7 +379,7 @@ func memtableToSSTable(filename string, memtable *memTable) (sst *SSTable, retEr
 		numDataBytes += int64(n1 + n2 + n3 + n4)
 		if lastSparseIndexUpdateOffset < 0 ||
 			numDataBytes >= memtable.config.MaxSparseIndexMapGap+lastSparseIndexUpdateOffset {
-			sparseIndex.ReplaceOrInsert(sparseIndexItem{key: string(item.key), offset: oldNumDataBytes})
+			sparseIndex.ReplaceOrInsert(sparseIndexItem{key: item.key, offset: oldNumDataBytes})
 			lastSparseIndexUpdateOffset = oldNumDataBytes
 		}
 		if err = pickFirstErr(err1, err2, err3, err4); err != nil {
@@ -398,10 +398,7 @@ func memtableToSSTable(filename string, memtable *memTable) (sst *SSTable, retEr
 		binary.BigEndian.PutUint32(b4, uint32(len(item.key)))
 		n1, err1 = f.Write(b4)
 		// key bytes
-		n2, err2 = f.Write([]byte(item.key))
-		if len(item.key) > 100 {
-			fmt.Println("wtf")
-		}
+		n2, err2 = f.Write(item.key)
 		// offset in data section
 		binary.BigEndian.PutUint64(b8, uint64(item.offset))
 		n3, err3 = f.Write(b8)
@@ -455,72 +452,73 @@ func (table *SSTable) nextSparseIndexItemFromFile(
 	b8 := make([]byte, 8)
 	b4 := make([]byte, 4)
 	if bytesReadCur, err = f.Read(b4); err != nil {
-		return sparseIndexItem{}, bytesReadCur + bytesRead, NewInternalError(err)
+		return item, bytesReadCur + bytesRead, NewInternalError(err)
 	}
 	bytesRead += bytesReadCur
 	keyLen := binary.BigEndian.Uint32(b4)
-	if keyLen > 100 {
-		x, y := f.Seek(0, io.SeekCurrent)
-		fmt.Println("what is this", x, y)
-	}
 
-	keyBytes := make([]byte, keyLen)
-	if bytesReadCur, err = f.Read(keyBytes); err != nil {
-		return sparseIndexItem{}, bytesReadCur + bytesRead, NewInternalError(err)
+	item.key = make([]byte, keyLen)
+	if bytesReadCur, err = f.Read(item.key); err != nil {
+		return item, bytesReadCur + bytesRead, NewInternalError(err)
 	}
 	bytesRead += bytesReadCur
-	item.key = string(keyBytes)
 
 	if bytesReadCur, err = f.Read(b8); err != nil {
-		return sparseIndexItem{}, bytesReadCur + bytesRead, NewInternalError(err)
-	}
-	if bytesReadCur != 8 {
-		fmt.Println("wowow wowo")
+		return item, bytesReadCur + bytesRead, NewInternalError(err)
 	}
 	bytesRead += bytesReadCur
 	item.offset = int64(binary.BigEndian.Uint64(b8))
 	return item, bytesRead, NoError
 }
 
-// nextSStableItemFromFile reads the next sstable item from disk. It returns the item value only if
-// the key matches forKey. This will save some reads from disk.
+// nextSStableItemFromFile reads the next sstable item from disk. It sets item.value only if
+// the item.key matches forKey. This will save some reads from disk.
+//
+// Return values:
+//   - cmp = bytes.Compare(item.getKeySlice(), forKey)
+//   - nBytesRead = number of bytes read
+//   - dberr = error
 func (table *SSTable) nextSStableItemFromFile(
 	f *bufReaderWithSeek, forKey []byte, item *ssTableItemDisk,
-) (nBytesRead int, dberr DbError) {
+) (cmp int, nBytesRead int, dberr DbError) {
 	nBytesReadCur := 0
 	nBytesRead = 0
 	b4 := make([]byte, 4)
 	var err error
 	if nBytesReadCur, err = io.ReadFull(f, b4); err != nil {
-		return nBytesReadCur + nBytesRead, NewInternalError(err)
+		return cmp, nBytesReadCur + nBytesRead, NewInternalError(err)
 	}
 	nBytesRead += nBytesReadCur
 	item.setKeyLen(int(binary.BigEndian.Uint32(b4)))
 
 	if nBytesReadCur, err = io.ReadFull(f, item.getKeySlice()); err != nil {
-		return nBytesReadCur + nBytesRead, NewInternalError(err)
+		return cmp, nBytesReadCur + nBytesRead, NewInternalError(err)
 	}
 	nBytesRead += nBytesReadCur
 
 	if nBytesReadCur, err = io.ReadFull(f, b4); err != nil {
-		return nBytesReadCur + nBytesRead, NewInternalError(err)
+		return cmp, nBytesReadCur + nBytesRead, NewInternalError(err)
 	}
 	nBytesRead += nBytesReadCur
 	valueLen := binary.BigEndian.Uint32(b4)
 
+	cmp = bytes.Compare(item.getKeySlice(), forKey)
 	if valueLen&uint32(1<<31) != 0 {
 		item.isDeleted = true
-	} else if bytes.Compare(item.key[:item.keyLen], forKey) == 0 {
+	} else if cmp == 0 {
+		// Read the value only if the current items key matches the desired key.
 		item.setValueLen(int(valueLen))
 		if nBytesReadCur, err = io.ReadFull(f, item.getValueSlice()); err != nil {
-			return nBytesReadCur + nBytesRead, NewInternalError(err)
+			return 0, nBytesReadCur + nBytesRead, NewInternalError(err)
 		}
 		nBytesRead += nBytesReadCur
 	} else {
+		// We are not interested in this key, dont read the value. Discard valueLen number of bytes so that
+		// the cursor is at the next entry.
 		nBytesRead += int(valueLen)
 		if _, err = f.Discard(int(valueLen)); err != nil {
-			return 0, NewInternalError(err)
+			return cmp, 0, NewInternalError(err)
 		}
 	}
-	return nBytesRead, NoError
+	return cmp, nBytesRead, NoError
 }
